@@ -14,6 +14,22 @@ os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    import peft.import_utils as _peft_iu
+
+    _orig_is_torchao = _peft_iu.is_torchao_available
+
+    def _safe_is_torchao_available():
+        try:
+            return _orig_is_torchao()
+        except ImportError:
+            return False
+
+    _peft_iu.is_torchao_available = _safe_is_torchao_available
+except Exception:
+    pass
+
 from peft import PeftModel
 
 BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"

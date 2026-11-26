@@ -21,6 +21,22 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    import peft.import_utils as _peft_iu
+
+    _orig_is_torchao = _peft_iu.is_torchao_available
+
+    def _safe_is_torchao_available():
+        try:
+            return _orig_is_torchao()
+        except ImportError:
+            return False
+
+    _peft_iu.is_torchao_available = _safe_is_torchao_available
+except Exception:
+    pass
+
 from peft import LoraConfig, get_peft_model
 
 BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"
