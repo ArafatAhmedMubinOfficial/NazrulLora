@@ -23,20 +23,11 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 try:
-    import peft.import_utils as _peft_iu
+    from src.peft_compat import patch_peft_torchao
+except ImportError:
+    from peft_compat import patch_peft_torchao
 
-    _orig_is_torchao = _peft_iu.is_torchao_available
-
-    def _safe_is_torchao_available():
-        try:
-            return _orig_is_torchao()
-        except ImportError:
-            return False
-
-    _peft_iu.is_torchao_available = _safe_is_torchao_available
-except Exception:
-    pass
-
+patch_peft_torchao()
 from peft import LoraConfig, get_peft_model
 
 BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"
