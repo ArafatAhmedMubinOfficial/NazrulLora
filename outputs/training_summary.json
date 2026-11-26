@@ -1,0 +1,30 @@
+{
+  "base_model": "hishab/titulm-llama-3.2-1b-v2.0",
+  "total_training_min": 50.8,
+  "stage1": {
+    "stage": "Stage1_CPT",
+    "elapsed_min": 26.47,
+    "opt_steps": 320,
+    "tokens_seen": 2621440,
+    "val_loss_before": 3.2157,
+    "val_loss_after": 2.7047,
+    "val_ppl_before": 24.92,
+    "val_ppl_after": 14.95
+  },
+  "stage2": {
+    "stage": "Stage2_SFT",
+    "elapsed_min": 17.23,
+    "opt_steps": 256,
+    "tokens_seen": 1357496,
+    "val_loss_before": 3.3693,
+    "val_loss_after": 3.0825,
+    "val_ppl_before": 29.06,
+    "val_ppl_after": 21.81
+  },
+  "stage2_polish": {
+    "elapsed_min": 7.1,
+    "opt_steps": 110,
+    "val_loss_before": 3.107,
+    "val_loss_after": 3.0826
+  }
+}

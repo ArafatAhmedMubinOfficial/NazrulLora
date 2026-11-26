@@ -53,10 +53,11 @@ def normalize_text(text: str) -> str:
 
 
 def clean_ekpatagolpo_text(text: str) -> str:
-    """Strip Ekpatagolpo UI controls and pagination footers from scraped content."""
-    text = re.sub(r"^[⤷\s]*A[−\-]A\+[⟲\s]*", "", text)
-    text = re.sub(r"\s*⤷[\d\s]*$", "", text)
-    text = re.sub(r"^\d+\s+Mins?\s+Read\s*", "", text, flags=re.I)
+    """Strip Ekpatagolpo UI controls, arrow glyphs, and pagination footers anywhere in text."""
+    text = re.sub(r"[⤶⤷⟲]+", " ", text)
+    text = re.sub(r"A\s*[−\-–—]\s*A\s*\+", " ", text)
+    text = re.sub(r"\b\d+\s+Mins?\s+Read\b", " ", text, flags=re.I)
+    text = re.sub(r"(?:\s+\d{1,3}){3,}\s*$", "", text)
     return normalize_text(text)
 
 
@@ -437,7 +438,27 @@ def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
                         cont_prompt = f"কাজী নজরুল ইসলামের গদ্যভঙ্গিতে নিচের অংশটির পরের অংশ লেখো:\n\n{prefix}"
                         examples.append({"prompt": cont_prompt, "response": suffix, "domain": f"nazrul_cont_{kind}"})
 
-    # 3. Add a few rich thematic meta-prompts using iconic poems/essays in train set
+    # 3. Add factual literary & biographical QA pairs about Kazi Nazrul Islam
+    nazrul_qa = [
+        ("বাংলাদেশের জাতীয় কবি কে এবং তাঁর সাহিত্যকর্মের মূল সুর কী?",
+         "বাংলাদেশের জাতীয় কবি কাজী নজরুল ইসলাম। তিনি 'বিদ্রোহী কবি' হিসেবে খ্যাত। তাঁর সাহিত্যকর্মের মূল সুর হলো অন্যায়, শোষণ ও পরাধীনতার বিরুদ্ধে বিদ্রোহ, সাম্য ও মানবতার জয়গান, এবং প্রেম, প্রকৃতি ও আধ্যাত্মিক সুরের অপূর্ব সমন্বয়।"),
+        ("কাজী নজরুল ইসলামের জন্ম ও মৃত্যু কবে এবং কোথায়?",
+         "কাজী নজরুল ইসলাম ১৮৯৯ সালের ২৪শে মে (১১ই জ্যৈষ্ঠ ১৩০৬ বঙ্গাব্দ) পশ্চিমবঙ্গের বর্ধমান জেলার চুরুলিয়া গ্রামে জন্মগ্রহণ করেন এবং ১৯৭৬ সালের ২৯শে আগস্ট ঢাকায় মৃত্যুবরণ করেন।"),
+        ("কাজী নজরুল ইসলামের বিখ্যাত কয়েকটি কাব্যগ্রন্থের নাম বলো।",
+         "কাজী নজরুল ইসলামের উল্লেখযোগ্য কাব্যগ্রন্থগুলোর মধ্যে রয়েছে অগ্নি-বীণা, বিষের বাঁশী, ভাঙ্গার গান, সাম্যবাদী, সর্বহারা, দোলনচাঁপা, ছায়ানট, ফণি-মনসা, সিন্ধু-হিন্দোল, চক্রবাক, সন্ধ্যা ও প্রলয়-শিখা।"),
+        ("কাজী নজরুল ইসলামের তিনটি উপন্যাস কী কী?",
+         "কাজী নজরুল ইসলামের তিনটি বিখ্যাত উপন্যাস হলো 'বাঁধন-হারা', 'মৃত্যুক্ষুধা' এবং 'কুহেলিকা'।"),
+        ("নজরুলগীতি বলতে কী বোঝায়?",
+         "কাজী নজরুল ইসলামের রচিত ও সুরারোপিত প্রায় চার হাজারেরও বেশি গান 'নজরুলগীতি' বা 'নজরুল সংগীত' নামে পরিচিত। এতে রাগ-রাগিণী, গজল, শ্যামাসংগীত, হামদ-নাত, দেশাত্মবোধক এবং গণসংগীতের অসাধারণ বৈচিত্র্য রয়েছে।"),
+        ("কাজী নজরুল ইসলামের বিখ্যাত প্রবন্ধ ও গল্পগ্রন্থগুলোর নাম লেখো।",
+         "নজরুলের উল্লেখযোগ্য প্রবন্ধগ্রন্থের মধ্যে রয়েছে যুগবাণী, রুদ্র-মঙ্গল, দুর্দিনের যাত্রী ও রাজবন্দীর জবানবন্দী। তাঁর বিখ্যাত গল্পগ্রন্থ হলো ব্যথার দান, রিক্তের বেদন এবং শিউলি মালা।"),
+        ("Who is the national poet of Bangladesh?",
+         "Kazi Nazrul Islam (1899–1976), widely celebrated as the Bidrohi Kobi (Rebel Poet), is the National Poet of Bangladesh. His poems, Nazrul Geeti songs, novels, and essays champion freedom, equality, justice, and human dignity."),
+    ]
+    for q, a in nazrul_qa:
+        for _ in range(4):
+            examples.append({"prompt": q, "response": a, "domain": "nazrul_qa"})
+
     rng.shuffle(examples)
     return examples
 
