@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+data/
+*.rar
+*.zip
+outputs/nazrul-lora-stage1/
+outputs/nazrul-1b-merged/
+.DS_Store
+Thumbs.db
