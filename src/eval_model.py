@@ -25,7 +25,7 @@ except ImportError:
 patch_peft_torchao()
 from peft import PeftModel
 
-BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
+BASE_MODEL_ID = "coder3101/gemma-4-E4B-it-heretic"
 
 TEST_PROMPTS = [
     ("revolutionary_poem", "কাজী নজরুল ইসলামের ভঙ্গিতে ছন্দ ও অন্ত্যমিল বজায় রেখে অন্যায় ও পরাধীনতার বিরুদ্ধে জাগরণের উপর ৮-১০ লাইনের একটি কবিতা লেখো।"),
@@ -50,9 +50,10 @@ def compute_val_ppl(model: torch.nn.Module, tok: AutoTokenizer, val_jsonl: Path,
             stream.extend(ids + [sep_id])
     n_blocks = min(max_blocks, len(stream) // seq_len)
     total_loss = 0.0
+    compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     for i in range(n_blocks):
         x = torch.tensor(stream[i * seq_len : (i + 1) * seq_len], dtype=torch.long, device=model.device).unsqueeze(0)
-        with torch.amp.autocast("cuda", dtype=torch.float16):
+        with torch.amp.autocast("cuda", dtype=compute_dtype):
             loss = model(input_ids=x, labels=x).loss
         total_loss += float(loss.item())
     return math.exp(min(20.0, total_loss / max(1, n_blocks)))
@@ -68,13 +69,14 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(args.adapter_dir)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     bnb = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True,
     )
-    base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, quantization_config=bnb, device_map="auto")
+    base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, quantization_config=bnb, dtype=compute_dtype, device_map="auto")
     base_model.eval()
     base_ppl = compute_val_ppl(base_model, tok, args.val_jsonl)
     print(f"[eval] Base Gemma-3-4B held-out Nazrul PPL: {base_ppl:.2f}", flush=True)
@@ -86,7 +88,7 @@ def main() -> None:
 
     samples = []
     for name, prompt in TEST_PROMPTS:
-        cands = 2 if "poem" in name or "geeti" in name or "satire" in name else 1
+        cands = 3 if any(k in name for k in ("poem", "geeti", "satire", "english")) else 1
         reply = generate(ft_model, tok, prompt, max_new_tokens=240, temperature=0.72, rhyme_candidates=cands)
         rhyme_sc = round(score_bangla_rhyme(reply), 2)
         print(f"\n--- [{name}] (rhyme_rate={rhyme_sc}) ---\nPROMPT: {prompt}\nNAZRUL-4B:\n{reply}", flush=True)

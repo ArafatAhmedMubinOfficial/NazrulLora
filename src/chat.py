@@ -23,7 +23,7 @@ except ImportError:
 patch_peft_torchao()
 from peft import PeftModel
 
-BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
+BASE_MODEL_ID = "coder3101/gemma-4-E4B-it-heretic"
 
 SYSTEM_PROMPT = (
     "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, অন্ত্যমিল, ওজস্বী ভাষা ও সৃজনশীল "
@@ -33,16 +33,29 @@ SYSTEM_PROMPT = (
 
 
 def score_bangla_rhyme(text: str) -> float:
-    """Measure fraction of verse lines sharing end-rhyme syllables."""
-    lines: List[str] = [ln.strip() for ln in text.splitlines() if len(re.sub(r"[^ঀ-৿]", "", ln)) >= 4]
-    if len(lines) < 4:
+    """Measure genuine Bengali verse end-rhyme while penalizing prose paragraphs and repeated lines."""
+    raw_lines: List[str] = [ln.strip() for ln in text.splitlines() if len(re.sub(r"[^ঀ-৿]", "", ln)) >= 4]
+    if len(raw_lines) < 4:
         return 0.0
-    keys = [re.sub(r"[^ঀ-৿]", "", ln)[-2:] for ln in lines]
-    matched = sum(
-        1
-        for i, k in enumerate(keys)
-        if k and k in [keys[j] for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(keys) and j != i]
-    )
+    bn_lines = [re.sub(r"[^ঀ-৿\s]", "", ln).strip() for ln in raw_lines]
+    # Penalize long prose sentences pretending to be verse
+    avg_chars = sum(len(re.sub(r"\s+", "", x)) for x in bn_lines) / len(bn_lines)
+    if avg_chars > 52:
+        return 0.05
+    # Penalize duplicate-line loops
+    unique_ratio = len(set(bn_lines)) / len(bn_lines)
+    if unique_ratio < 0.65:
+        return 0.05
+
+    end_words = [ln.split()[-1] if ln.split() else "" for ln in bn_lines]
+    keys = [w[-2:] if len(w) >= 2 else w for w in end_words]
+    matched = 0
+    for i, (k, w) in enumerate(zip(keys, end_words)):
+        if not k:
+            continue
+        neighbors = [j for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(keys) and j != i]
+        if any(keys[j] == k and end_words[j] != w for j in neighbors):
+            matched += 1
     return matched / len(keys)
 
 
@@ -52,16 +65,17 @@ def load_nazrul_model(model_path: Path, base_model_id: str = BASE_MODEL_ID, load
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
+    compute_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
     if torch.cuda.is_available() and load_in_4bit:
         bnb = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_use_double_quant=True,
         )
-        base = AutoModelForCausalLM.from_pretrained(base_model_id, quantization_config=bnb, device_map="auto")
+        base = AutoModelForCausalLM.from_pretrained(base_model_id, quantization_config=bnb, dtype=compute_dtype, device_map="auto")
     elif torch.cuda.is_available():
-        base = AutoModelForCausalLM.from_pretrained(base_model_id, dtype=torch.float16, device_map="auto")
+        base = AutoModelForCausalLM.from_pretrained(base_model_id, dtype=compute_dtype, device_map="auto")
     else:
         base = AutoModelForCausalLM.from_pretrained(base_model_id, dtype=torch.float32)
 

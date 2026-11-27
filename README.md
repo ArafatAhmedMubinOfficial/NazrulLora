@@ -1,9 +1,9 @@
 # Nazrul-4B (`NazrulLora`) — Kazi Nazrul Islam Bangla AI
 
-A compact, fluent **4.3B Bangla generative AI** (`unsloth/gemma-3-4b-it` + 4-bit QLoRA `r=16`, `~57 MB` fp16 adapter stored directly in Git without LFS) trained on Google Colab T4 via **Colab CLI** in under 1 hour.
+A compact, fluent **Gemma 4 E4B uncensored Bangla generative AI** (`coder3101/gemma-4-E4B-it-heretic` + 4-bit QLoRA `r=16`, fp16 adapter stored directly in Git without LFS) trained on Google Colab T4 via **Colab CLI** in under 1 hour.
 
-## Why Gemma-3-4B (`unsloth/gemma-3-4b-it`)?
-After benchmarking five 2025–2026 `2B–4B` models head-to-head on Colab T4 (`hishab/titulm-llama-3.2-3b-v2.0-Instruct-v1.0`, `BanglaLLM/Bangla-s1k-qwen-2.5-3B-Instruct`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3.5-4B`, and `unsloth/gemma-3-4b-it`), `unsloth/gemma-3-4b-it` led in Bengali tokenizer efficiency (`3.74` chars/token), modern custom-prompt adherence, and zero-shot Bengali end-rhyme (`অন্ত্যমিল`), while fitting in `~3.25 GB` VRAM in 4-bit.
+## Why Heretic Gemma-4-E4B (`coder3101/gemma-4-E4B-it-heretic`)?
+After benchmarking standard and abliterated 3B–4B candidates on Colab T4 (`unsloth/gemma-3-4b-it`, `mlabonne/gemma-3-4b-it-abliterated-v2`, `saidutta69/gemma-3-4b-it-heretic`, and `coder3101/gemma-4-E4B-it-heretic`), `coder3101/gemma-4-E4B-it-heretic` (decensored via Heretic v1.2.0 ARA) avoided both the repetition collapse of standard abliteration and English-word mixing, writing fluent rhymed Bengali couplets out of the box while fitting in 4-bit on T4 (`~8.68 GB`).
 
 ## Two-Stage Training Pipeline (< 1 Hour on Colab T4)
 1. **Stage 1 — Continual Pretraining (Nazrul Corpus + Bengali Poetics + Modern Context)**:
@@ -36,7 +36,21 @@ pip install modal && modal setup
 modal run scripts/modal_app.py --prompt "কাজী নজরুলের ভঙ্গিতে বর্ষা ও মেঘ নিয়ে একটি নজরুলগীতি লেখো।"
 ```
 
-### 3. Retrain on Google Colab via Colab CLI (< 1 Hour)
+### 3. Train 2-Hour Multi-Round L4 Run on Camber (or any L4 / A100 cloud GPU)
+The `unsensored` branch packs a large multi-round training dataset (`2,534` unique Nazrul works upsampled `3x`, `18` Bengali poetics/meter/Nazrul craft articles, `4,500` Bangla Wikipedia docs, `1,800` classic Bangla literature docs, `3,500` non-Nazrul Bengali poems, and `5,000` Bangla Alpaca-Orca instructions):
+
+```bash
+git clone -b unsensored https://github.com/ArafatAhmedMubinOfficial/NazrulLora.git && cd NazrulLora
+bash scripts/run_camber_l4.sh
+```
+Or customize rounds/budgets directly:
+```bash
+python3 src/prepare_data.py --cache-dir data/cache --out-dir data/processed
+python3 src/train.py --preset l4 --rounds 2 --data-dir data/processed --out-dir outputs
+python3 src/eval_model.py --adapter-dir outputs/nazrul-lora
+```
+
+### 4. Retrain on Google Colab T4 via Colab CLI (< 1 Hour)
 ```powershell
 .\scripts\run_colab_train.ps1
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two-stage Colab T4 QLoRA training for Nazrul-4B (unsloth/gemma-3-4b-it):
+"""Two-stage Colab T4 QLoRA training for Nazrul-4B (coder3101/gemma-4-E4B-it-heretic):
 Stage 1: Domain Continual Pretraining (Nazrul corpus + Bengali poetics + modern Bangla)
 Stage 2: Craft, Rhyme-Blueprint & Custom-Prompt SFT (assistant-only loss masking)
 """
@@ -28,10 +28,13 @@ except ImportError:
     from peft_compat import patch_peft_torchao
 
 patch_peft_torchao()
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftModel, get_peft_model
 
-BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
-LANGUAGE_MODEL_LORA_REGEX = r"model\.language_model\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
+BASE_MODEL_ID = "coder3101/gemma-4-E4B-it-heretic"
+LANGUAGE_MODEL_LORA_REGEX = (
+    r"(?:model\.language_model|model)\.layers\.\d+\.(?:self_attn|mlp)\."
+    r"(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
+)
 
 SYSTEM_PROMPT = (
     "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, অন্ত্যমিল, ওজস্বী ভাষা ও সৃজনশীল "
@@ -130,8 +133,12 @@ def make_sft_collate(pad_id: int):
     return collate_fn
 
 
+def _compute_dtype() -> torch.dtype:
+    return torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+
+
 @torch.no_grad()
-def evaluate_loss(model: torch.nn.Module, loader: DataLoader, max_batches: int = 30) -> float:
+def evaluate_loss(model: torch.nn.Module, loader: DataLoader, compute_dtype: torch.dtype, max_batches: int = 30) -> float:
     model.eval()
     total_loss = 0.0
     count = 0
@@ -139,7 +146,7 @@ def evaluate_loss(model: torch.nn.Module, loader: DataLoader, max_batches: int =
         if i >= max_batches:
             break
         batch = {k: v.to("cuda") for k, v in batch.items()}
-        with torch.amp.autocast("cuda", dtype=torch.float16):
+        with torch.amp.autocast("cuda", dtype=compute_dtype):
             out = model(**batch)
         if not torch.isnan(out.loss):
             total_loss += float(out.loss.item())
@@ -160,6 +167,7 @@ def cosine_lr(step: int, total_steps: int, warmup_steps: int, base_lr: float, mi
 def run_stage(
     name: str,
     model: torch.nn.Module,
+    tok: AutoTokenizer,
     train_loader: DataLoader,
     val_loader: DataLoader,
     lr: float,
@@ -167,6 +175,9 @@ def run_stage(
     max_epochs: float,
     max_steps: int,
     max_minutes: float,
+    compute_dtype: torch.dtype,
+    ckpt_dir: Path | None = None,
+    save_every: int = 50,
     log_every: int = 2,
 ) -> dict:
     model.train()
@@ -178,9 +189,9 @@ def run_stage(
     total_opt_steps = min(epoch_steps, max_steps) if max_steps > 0 else epoch_steps
     warmup_steps = max(4, int(0.08 * total_opt_steps))
 
-    val_before = evaluate_loss(model, val_loader)
+    val_before = evaluate_loss(model, val_loader, compute_dtype)
     print(
-        f"\n=== [{name}] start | micro_batches={len(train_loader)} | target_opt_steps={total_opt_steps} | max_min={max_minutes:.1f} | val_loss_before={val_before:.4f} (ppl={math.exp(min(20, val_before)):.2f}) ===",
+        f"\n=== [{name}] start | micro_batches={len(train_loader)} | target_opt_steps={total_opt_steps} | max_min={max_minutes:.1f} | lr={lr:.2e} | val_loss_before={val_before:.4f} (ppl={math.exp(min(20, val_before)):.2f}) ===",
         flush=True,
     )
 
@@ -199,7 +210,8 @@ def run_stage(
         for micro_idx, batch in enumerate(train_loader):
             batch = {k: v.to("cuda", non_blocking=True) for k, v in batch.items()}
             tokens_seen += int(batch["attention_mask"].sum().item())
-            loss = model(**batch).loss / grad_accum
+            with torch.amp.autocast("cuda", dtype=compute_dtype):
+                loss = model(**batch).loss / grad_accum
             loss.backward()
             step_loss += float(loss.item())
 
@@ -226,6 +238,11 @@ def run_stage(
                     log_loss_sum = 0.0
                     log_steps = 0
 
+                if ckpt_dir is not None and save_every > 0 and opt_step % save_every == 0:
+                    latest = ckpt_dir / "latest"
+                    model.save_pretrained(latest)
+                    tok.save_pretrained(latest)
+
                 if (time.time() - t0) / 60.0 >= max_minutes:
                     print(f"[{name}] Reached time budget ({max_minutes:.1f}m), finishing stage cleanly.", flush=True)
                     stop_early = True
@@ -233,7 +250,7 @@ def run_stage(
                 if opt_step >= total_opt_steps:
                     break
 
-    val_after = evaluate_loss(model, val_loader)
+    val_after = evaluate_loss(model, val_loader, compute_dtype)
     elapsed_min = (time.time() - t0) / 60.0
     print(
         f"=== [{name}] done in {elapsed_min:.1f}m | opt_steps={opt_step} | tokens={tokens_seen:,} | val_loss_after={val_after:.4f} (ppl={math.exp(min(20, val_after)):.2f}) ===",
@@ -252,32 +269,54 @@ def run_stage(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Nazrul-4B (Gemma-3 QLoRA) on Colab T4 in under 1 hour")
+    parser = argparse.ArgumentParser(description="Multi-round QLoRA training for Nazrul-4B (Gemma-4-E4B on L4/T4)")
+    parser.add_argument("--preset", choices=["l4", "t4"], default="l4", help="l4=2h multi-round (24GB bf16); t4=<1h (15GB fp16)")
     parser.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
-    parser.add_argument("--stage1-minutes", type=float, default=19.0)
-    parser.add_argument("--stage2-minutes", type=float, default=25.0)
-    parser.add_argument("--stage1-max-steps", type=int, default=45)
-    parser.add_argument("--stage2-max-steps", type=int, default=115)
+    parser.add_argument("--rounds", type=int, default=None)
+    parser.add_argument("--stage1-minutes", type=float, default=None)
+    parser.add_argument("--stage2-minutes", type=float, default=None)
+    parser.add_argument("--stage1-max-steps", type=int, default=None)
+    parser.add_argument("--stage2-max-steps", type=int, default=None)
     parser.add_argument("--stage1-epochs", type=float, default=1.0)
-    parser.add_argument("--stage2-epochs", type=float, default=2.0)
-    parser.add_argument("--cpt-seq-len", type=int, default=512)
-    parser.add_argument("--sft-max-len", type=int, default=576)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--grad-accum", type=int, default=8)
+    parser.add_argument("--stage2-epochs", type=float, default=3.0)
+    parser.add_argument("--cpt-seq-len", type=int, default=None)
+    parser.add_argument("--sft-max-len", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--grad-accum", type=int, default=None)
+    parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--resume-lora", type=Path, default=None)
     parser.add_argument("--skip-stage1", action="store_true")
+    parser.add_argument("--cpt-lr", type=float, default=1e-4)
     parser.add_argument("--sft-lr", type=float, default=6e-5)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    presets = {
+        "l4": dict(rounds=2, s1_min=40.0, s2_min=45.0, s1_steps=260, s2_steps=420, cpt_len=768, sft_len=768, bs=2, accum=8),
+        "t4": dict(rounds=1, s1_min=18.0, s2_min=27.0, s1_steps=45, s2_steps=115, cpt_len=512, sft_len=576, bs=1, accum=16),
+    }
+    p = presets[args.preset]
+    rounds = args.rounds if args.rounds is not None else p["rounds"]
+    s1_min = args.stage1_minutes if args.stage1_minutes is not None else p["s1_min"]
+    s2_min = args.stage2_minutes if args.stage2_minutes is not None else p["s2_min"]
+    s1_steps = args.stage1_max_steps if args.stage1_max_steps is not None else p["s1_steps"]
+    s2_steps = args.stage2_max_steps if args.stage2_max_steps is not None else p["s2_steps"]
+    cpt_seq_len = args.cpt_seq_len if args.cpt_seq_len is not None else p["cpt_len"]
+    sft_max_len = args.sft_max_len if args.sft_max_len is not None else p["sft_len"]
+    batch_size = args.batch_size if args.batch_size is not None else p["bs"]
+    grad_accum = args.grad_accum if args.grad_accum is not None else p["accum"]
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = args.out_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[train] Loading tokenizer & 4-bit NF4 base model: {BASE_MODEL_ID}", flush=True)
+    compute_dtype = _compute_dtype()
+    print(f"[train] Preset={args.preset} | rounds={rounds} | compute_dtype={compute_dtype} | base={BASE_MODEL_ID}", flush=True)
     tok = AutoTokenizer.from_pretrained(args.resume_lora if args.resume_lora else BASE_MODEL_ID)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -285,16 +324,15 @@ def main() -> None:
     bnb = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True,
     )
-    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, quantization_config=bnb, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, quantization_config=bnb, dtype=compute_dtype, device_map="auto")
     model.config.use_cache = False
-    model = prepare_model_for_kbit_training(
-        model,
-        use_gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
-    )
+    for param in model.parameters():
+        param.requires_grad_(False)
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     if args.resume_lora:
         print(f"[train] Resuming trainable QLoRA adapter from {args.resume_lora}", flush=True)
@@ -311,66 +349,90 @@ def main() -> None:
         model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
-    s1_metrics = None
+    cpt_train_loader = cpt_val_loader = None
     if not args.skip_stage1:
         print("[train] Loading Stage 1 CPT datasets...", flush=True)
-        cpt_train_ds = PackedCPTDataset(args.data_dir / "cpt_train.jsonl", tok, seq_len=args.cpt_seq_len)
-        cpt_val_ds = PackedCPTDataset(args.data_dir / "cpt_val.jsonl", tok, seq_len=args.cpt_seq_len, max_blocks=40)
-        cpt_train_loader = DataLoader(cpt_train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
+        cpt_train_ds = PackedCPTDataset(args.data_dir / "cpt_train.jsonl", tok, seq_len=cpt_seq_len)
+        cpt_val_ds = PackedCPTDataset(args.data_dir / "cpt_val.jsonl", tok, seq_len=cpt_seq_len, max_blocks=40)
+        cpt_train_loader = DataLoader(cpt_train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
         cpt_val_loader = DataLoader(cpt_val_ds, batch_size=1, shuffle=False)
-        print(f"[train] CPT train blocks={len(cpt_train_ds)} ({len(cpt_train_ds)*args.cpt_seq_len:,} tokens), val blocks={len(cpt_val_ds)}", flush=True)
-
-        s1_metrics = run_stage(
-            name="Stage1_CPT",
-            model=model,
-            train_loader=cpt_train_loader,
-            val_loader=cpt_val_loader,
-            lr=1e-4,
-            grad_accum=args.grad_accum,
-            max_epochs=args.stage1_epochs,
-            max_steps=args.stage1_max_steps,
-            max_minutes=args.stage1_minutes,
-            log_every=2,
-        )
-
-        s1_dir = args.out_dir / "nazrul-lora-stage1"
-        model.save_pretrained(s1_dir)
-        tok.save_pretrained(s1_dir)
+        print(f"[train] CPT train blocks={len(cpt_train_ds)} ({len(cpt_train_ds)*cpt_seq_len:,} tokens), val blocks={len(cpt_val_ds)}", flush=True)
 
     print("[train] Loading Stage 2 SFT datasets...", flush=True)
-    sft_train_ds = SFTDataset(args.data_dir / "sft_train.jsonl", tok, max_len=args.sft_max_len)
-    sft_val_ds = SFTDataset(args.data_dir / "sft_val.jsonl", tok, max_len=args.sft_max_len)
+    sft_train_ds = SFTDataset(args.data_dir / "sft_train.jsonl", tok, max_len=sft_max_len)
+    sft_val_ds = SFTDataset(args.data_dir / "sft_val.jsonl", tok, max_len=sft_max_len)
     collate_fn = make_sft_collate(tok.pad_token_id)
-    sft_train_loader = DataLoader(sft_train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
+    sft_train_loader = DataLoader(sft_train_ds, batch_size=batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
     sft_val_loader = DataLoader(sft_val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
     print(f"[train] SFT train examples={len(sft_train_ds)}, val examples={len(sft_val_ds)}", flush=True)
 
-    s2_metrics = run_stage(
-        name="Stage2_SFT",
-        model=model,
-        train_loader=sft_train_loader,
-        val_loader=sft_val_loader,
-        lr=args.sft_lr,
-        grad_accum=args.grad_accum,
-        max_epochs=args.stage2_epochs,
-        max_steps=args.stage2_max_steps,
-        max_minutes=args.stage2_minutes,
-        log_every=5,
-    )
+    round_logs = []
+    total_min = 0.0
+    for r_idx in range(1, rounds + 1):
+        decay = 0.55 ** (r_idx - 1)
+        # Round 2+ acts as a shorter refinement loop (25% CPT refresh + 50% SFT polish)
+        r_s1_min = s1_min if r_idx == 1 else round(s1_min * 0.25, 2)
+        r_s2_min = s2_min if r_idx == 1 else round(s2_min * 0.50, 2)
+        r_s1_steps = s1_steps if r_idx == 1 else max(25, s1_steps // 3)
+        r_s2_steps = s2_steps if r_idx == 1 else max(40, s2_steps // 2)
+
+        s1_metrics = None
+        if not args.skip_stage1 and cpt_train_loader is not None:
+            s1_metrics = run_stage(
+                name=f"R{r_idx}_CPT",
+                model=model,
+                tok=tok,
+                train_loader=cpt_train_loader,
+                val_loader=cpt_val_loader,
+                lr=args.cpt_lr * decay,
+                grad_accum=grad_accum,
+                max_epochs=args.stage1_epochs,
+                max_steps=r_s1_steps,
+                max_minutes=r_s1_min,
+                compute_dtype=compute_dtype,
+                ckpt_dir=ckpt_dir,
+                save_every=args.save_every,
+                log_every=5,
+            )
+            total_min += s1_metrics["elapsed_min"]
+
+        s2_metrics = run_stage(
+            name=f"R{r_idx}_SFT",
+            model=model,
+            tok=tok,
+            train_loader=sft_train_loader,
+            val_loader=sft_val_loader,
+            lr=args.sft_lr * decay,
+            grad_accum=grad_accum,
+            max_epochs=args.stage2_epochs,
+            max_steps=r_s2_steps,
+            max_minutes=r_s2_min,
+            compute_dtype=compute_dtype,
+            ckpt_dir=ckpt_dir,
+            save_every=args.save_every,
+            log_every=5,
+        )
+        total_min += s2_metrics["elapsed_min"]
+
+        r_dir = args.out_dir / f"nazrul-lora-round{r_idx}"
+        model.save_pretrained(r_dir)
+        tok.save_pretrained(r_dir)
+        round_logs.append({"round": r_idx, "stage1": s1_metrics, "stage2": s2_metrics})
 
     final_lora_dir = args.out_dir / "nazrul-lora"
-    for p in model.parameters():
-        if p.requires_grad:
-            p.data = p.data.half()
+    for param in model.parameters():
+        if param.requires_grad:
+            param.data = param.data.half()
     model.save_pretrained(final_lora_dir)
     tok.save_pretrained(final_lora_dir)
     print(f"[train] Saved final fp16 LoRA adapter & tokenizer to {final_lora_dir}", flush=True)
 
     summary = {
         "base_model": BASE_MODEL_ID,
-        "total_training_min": round((s1_metrics["elapsed_min"] if s1_metrics else 0.0) + s2_metrics["elapsed_min"], 2),
-        "stage1": s1_metrics,
-        "stage2": s2_metrics,
+        "preset": args.preset,
+        "rounds_completed": rounds,
+        "total_training_min": round(total_min, 2),
+        "rounds": round_logs,
     }
     (args.out_dir / "training_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("[train] Complete summary:", json.dumps(summary, ensure_ascii=False, indent=2), flush=True)

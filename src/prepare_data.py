@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import shutil
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -23,7 +24,7 @@ os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
+BASE_MODEL_ID = "coder3101/gemma-4-E4B-it-heretic"
 
 SYSTEM_PROMPT = (
     "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, ওজস্বী ভাষা ও সৃজনশীল শৈলীতে "
@@ -220,11 +221,15 @@ def collect_nazrul_corpus(cache_dir: Path) -> List[dict]:
                 "https://github.com/rafayetrafi/BanglaMusicStylo-A-Stylometric-Dataset-of-Bangla-Music-Lyrics/raw/master/BanglaStylometry%20Dataset.rar",
                 rar_file,
             )
-        subprocess.run(["apt-get", "-qq", "update"], check=False)
-        subprocess.run(["apt-get", "-qq", "install", "-y", "unrar"], check=False)
+        if not shutil.which("unrar"):
+            subprocess.run(["apt-get", "-qq", "update"], check=False)
+            subprocess.run(["apt-get", "-qq", "install", "-y", "unrar"], check=False)
         ms_extract = cache_dir / "music_stylo"
         ms_extract.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["unrar", "x", "-o+", "-idq", str(rar_file), str(ms_extract)], check=False)
+        if shutil.which("unrar"):
+            subprocess.run(["unrar", "x", "-o+", "-idq", str(rar_file), str(ms_extract)], check=False)
+        else:
+            print("[data] Warning: 'unrar' not installed; skipping BanglaMusicStylo archive.", flush=True)
     if ms_dir.exists():
         for fn in sorted(ms_dir.iterdir()):
             if fn.stat().st_size == 0:
@@ -278,19 +283,20 @@ def collect_nazrul_corpus(cache_dir: Path) -> List[dict]:
     return docs
 
 
-def collect_basic_bangla_corpus(cache_dir: Path, max_wiki_docs: int = 1200, max_sahitya_docs: int = 450, max_poem_docs: int = 1000) -> List[dict]:
+def collect_basic_bangla_corpus(cache_dir: Path, max_wiki_docs: int = 4500, max_sahitya_docs: int = 1800, max_poem_docs: int = 3500) -> List[dict]:
     """Collect clean general Bangla Wikipedia and classic literature documents for language grounding."""
     docs: List[dict] = []
 
-    # 1. Clean Bangla Wikipedia (streaming first shard to stay fast)
-    wiki_cache = cache_dir / "basic_wiki.jsonl"
+    # 1. Clean Bangla Wikipedia (multiple shards for large L4 training)
+    wiki_cache = cache_dir / f"basic_wiki_{max_wiki_docs}.jsonl"
     if wiki_cache.exists():
         with wiki_cache.open("r", encoding="utf-8") as f:
             for line in f:
                 docs.append(json.loads(line))
     else:
-        print("[data] Sampling clean Bangla Wikipedia articles...", flush=True)
-        ds_wiki = load_dataset("sayurio/bangla-wikipedia", data_files=["jsonl/data_001.jsonl"], split="train", streaming=True)
+        print(f"[data] Sampling up to {max_wiki_docs} clean Bangla Wikipedia articles...", flush=True)
+        wiki_files = ["jsonl/data_001.jsonl", "jsonl/data_002.jsonl", "jsonl/data_003.jsonl"]
+        ds_wiki = load_dataset("sayurio/bangla-wikipedia", data_files=wiki_files, split="train", streaming=True)
         wiki_rows = []
         skip_prefixes = ("মিডিয়াউইকি:", "উইকিপিডিয়া:", "টেমপ্লেট:", "বিষয়শ্রেণী:", "চিত্র:", "সাহায্য:", "মডিউল:", "প্রবেশদ্বার:")
         for row in ds_wiki:
@@ -298,7 +304,7 @@ def collect_basic_bangla_corpus(cache_dir: Path, max_wiki_docs: int = 1200, max_
             content = normalize_text(row.get("content") or "")
             if title.startswith(skip_prefixes) or len(content) < 350 or bangla_ratio(content) < 0.72:
                 continue
-            wiki_rows.append({"title": title, "text": content[:2500], "kind": "wiki"})
+            wiki_rows.append({"title": title, "text": content[:3000], "kind": "wiki"})
             if len(wiki_rows) >= max_wiki_docs:
                 break
         with wiki_cache.open("w", encoding="utf-8") as f:
@@ -316,7 +322,7 @@ def collect_basic_bangla_corpus(cache_dir: Path, max_wiki_docs: int = 1200, max_
         txt = normalize_text(row.get("text") or "")
         if len(txt) < 150 or bangla_ratio(txt) < 0.72:
             continue
-        docs.append({"title": row.get("title") or "", "text": txt[:2500], "kind": "classic_bn"})
+        docs.append({"title": row.get("title") or "", "text": txt[:3000], "kind": "classic_bn"})
         added_sah += 1
         if added_sah >= max_sahitya_docs:
             break
@@ -381,21 +387,32 @@ THEME_LEXICON = [
 
 
 def fetch_wikipedia_craft_articles(cache_dir: Path) -> List[dict]:
-    """Fetch Bengali Wikipedia articles on Bengali meter, poetic ornaments, and Nazrul's craft."""
-    craft_cache = cache_dir / "bangla_poetics_craft.jsonl"
+    """Fetch Bengali Wikipedia articles on Bengali meter, rhyme, poetic ornaments, and Nazrul's craft."""
+    craft_cache = cache_dir / "bangla_poetics_craft_v2.jsonl"
     if craft_cache.exists():
         with craft_cache.open("r", encoding="utf-8") as f:
             return [json.loads(line) for line in f]
 
-    print("[data] Fetching Bengali poetics & Nazrul literary craft articles...", flush=True)
+    print("[data] Fetching Bengali poetics, meter & Nazrul literary craft articles...", flush=True)
     titles = [
         ("কাজী_নজরুল_ইসলাম", "কাজী নজরুল ইসলামের সাহিত্যিক শৈলী ও জীবন"),
         ("নজরুলগীতি", "নজরুলগীতির সুর, তাল ও রচনাশৈলী"),
         ("বিদ্রোহী_(কবিতা)", "বিদ্রোহী কবিতার রচনাকৌশল ও ছন্দ"),
+        ("অগ্নি-বীণা", "কাজী নজরুল ইসলামের অগ্নি-বীণা কাব্যগ্রন্থের শৈলী ও গুরুত্ব"),
+        ("বিষের_বাঁশী", "বিষের বাঁশী কাব্যগ্রন্থের প্রতিবাদী সুর ও ছন্দ"),
+        ("সাম্যবাদী", "সাম্যবাদী কাব্যগ্রন্থের মানবতাবাদী ভাবধারা"),
         ("অলংকার_(সাহিত্য)", "বাংলা কাব্যে অলংকার, উপমা ও রূপকের ব্যবহার"),
         ("ছন্দ", "কবিতার ছন্দ ও মাত্রাবিন্যাস"),
+        ("স্বরবৃত্ত_ছন্দ", "বাংলা কবিতায় স্বরবৃত্ত ছন্দের নিয়ম ও উদাহরণ"),
+        ("মাত্রাবৃত্ত_ছন্দ", "বাংলা কবিতায় মাত্রাবৃত্ত ছন্দের কাঠামো ও দোলা"),
+        ("অক্ষরবৃত্ত_ছন্দ", "বাংলা কবিতায় অক্ষরবৃত্ত ছন্দের গাম্ভীর্য ও ব্যবহার"),
+        ("মিত্রাক্ষর_ছন্দ", "বাংলা কবিতায় অন্ত্যমিল বা মিত্রাক্ষর ছন্দের কৌশল"),
+        ("অমিত্রাক্ষর_ছন্দ", "বাংলা কবিতায় অমিত্রাক্ষর ছন্দের গঠন"),
+        ("পয়ার", "বাংলা পয়ার ছন্দ ও চরণ-বিন্যাস"),
         ("কবিতা", "কবিতার গঠন, মিল ও কাব্যকলা"),
         ("বাংলা_কবিতা", "বাংলা কবিতার ধারা ও ঐতিহ্য"),
+        ("গজল", "গজল রচনার নিয়ম, মৎলা, মক্তা ও নজরুল-গজল"),
+        ("বাংলা_সাহিত্য", "বাংলা সাহিত্যের যুগবিভাগ ও কাব্যধারা"),
     ]
     articles: List[dict] = []
     for page, desc in titles:
@@ -516,24 +533,30 @@ def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
         themes = infer_themes(doc["text"], title)
         theme_str = themes[0]
 
-        first_chunk = chunks[0]
-        if len(first_chunk) >= 80:
+        max_gen_ch = 6 if kind in ("poem", "song") else 3
+        for ch_idx, chunk in enumerate(chunks[:max_gen_ch]):
+            if len(chunk) < 80:
+                continue
+            ch_title = title if ch_idx == 0 else f"{title} (অংশ {ch_idx + 1})"
             if kind == "song":
-                p = rng.choice(song_prompts_bn).format(title=title, theme=theme_str)
-                examples.append({"prompt": p, "response": first_chunk, "domain": "nazrul_song"})
+                p = rng.choice(song_prompts_bn).format(title=ch_title, theme=theme_str)
+                examples.append({"prompt": p, "response": chunk, "domain": "nazrul_song"})
             elif kind == "poem":
-                lines = [ln.strip() for ln in first_chunk.splitlines() if ln.strip()]
+                lines = [ln.strip() for ln in chunk.splitlines() if ln.strip()]
                 rhyme = score_verse_rhyme(lines)
                 rhyme_hint = extract_rhyme_pairs_hint(lines)
                 repeats = 2 if rhyme >= 0.4 else 1
                 for _ in range(repeats):
-                    p = rng.choice(poem_prompts_bn + poem_prompts_en).format(title=title, theme=theme_str)
-                    examples.append({"prompt": p, "response": first_chunk, "domain": "nazrul_poem"})
+                    p = rng.choice(poem_prompts_bn + poem_prompts_en).format(title=ch_title, theme=theme_str)
+                    examples.append({"prompt": p, "response": chunk, "domain": "nazrul_poem"})
                 if len(lines) >= 8 and rhyme >= 0.35:
-                    stanza = "\n".join(lines[:10])
-                    p2 = f"কাজী নজরুলের ভঙ্গিতে অন্ত্যমিল ও ছন্দ ঠিক রেখে নিচের বিষয়ে একটি সংক্ষিপ্ত কবিতা লেখো: {theme_str}।"
+                    stanza = "\n".join(lines[:12])
+                    p2 = rng.choice([
+                        f"কাজী নজরুলের ভঙ্গিতে অন্ত্যমিল ও ছন্দ ঠিক রেখে নিচের বিষয়ে একটি সংক্ষিপ্ত কবিতা লেখো: {theme_str}।",
+                        f"গদ্য নয়—কেবল প্রতি চরণে স্পষ্ট অন্ত্যমিল ও ছন্দ রেখে কাজী নজরুলের ভঙ্গিতে '{theme_str}' নিয়ে একটি কবিতা লেখো।",
+                    ])
                     examples.append({"prompt": p2, "response": stanza, "domain": "nazrul_poem_rhymed"})
-                    if rhyme_hint and rng.random() < 0.35:
+                    if rhyme_hint and rng.random() < 0.45:
                         craft_resp = (
                             f"[ছন্দ ও মিল-পরিকল্পনা: {theme_str} ভাবনা, অন্ত্যমিল ({rhyme_hint}), ওজস্বী ও গীতল ছন্দ]\n\n"
                             f"{stanza}"
@@ -541,13 +564,13 @@ def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
                         p3 = f"কাজী নজরুলের লেখার কৌশল ও অন্ত্যমিল ({rhyme_hint}) ব্যবহার করে '{theme_str}' বিষয়ে একটি ছন্দোবদ্ধ কবিতা লেখো।"
                         examples.append({"prompt": p3, "response": craft_resp, "domain": "nazrul_craft_blueprint"})
             elif kind in ("essay", "story", "novel", "play", "letter", "prose"):
-                p = f"কাজী নজরুল ইসলামের {genre_label} শৈলীতে '{title}' বিষয়ে একটি গদ্য লেখা রচনা করো।"
-                if rng.random() < 0.4:
-                    p = rng.choice(prose_prompts_bn).format(title=title)
-                examples.append({"prompt": p, "response": first_chunk, "domain": f"nazrul_{kind}"})
+                p = f"কাজী নজরুল ইসলামের {genre_label} শৈলীতে '{ch_title}' বিষয়ে একটি গদ্য লেখা রচনা করো।"
+                if rng.random() < 0.45:
+                    p = rng.choice(prose_prompts_bn).format(title=ch_title)
+                examples.append({"prompt": p, "response": chunk, "domain": f"nazrul_{kind}"})
 
-        # 2. Line/passage continuation prompt (limit prose chunks so poems/songs dominate SFT)
-        max_ch = 3 if kind in ("poem", "song") else 1
+        # 2. Line/passage continuation prompt (rich multi-chunk coverage for 2h L4 training)
+        max_ch = 5 if kind in ("poem", "song") else 2
         for ch in chunks[:max_ch]:
             lines = [ln for ln in ch.splitlines() if ln.strip()]
             if len(lines) >= 4:
@@ -595,17 +618,16 @@ def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
     return examples
 
 
-def collect_general_bangla_sft(max_examples: int = 2000, seed: int = 42) -> List[dict]:
+def collect_general_bangla_sft(max_examples: int = 5000, seed: int = 42) -> List[dict]:
     """Collect clean Bangla general instruction-following examples for reasoning grounding."""
-    print("[data] Streaming BanglaLLM/bangla-alpaca-orca general instructions...", flush=True)
+    print(f"[data] Streaming up to {max_examples} BanglaLLM/bangla-alpaca-orca general instructions...", flush=True)
     ds = load_dataset("BanglaLLM/bangla-alpaca-orca", split="train", streaming=True)
     rng = random.Random(seed)
     out: List[dict] = []
     for idx, row in enumerate(ds):
-        if idx > 25000 and len(out) >= max_examples:
+        if idx > 80000 or len(out) >= max_examples:
             break
-        # Subsample every few rows for topic diversity while streaming fast
-        if idx % 3 != 0:
+        if idx % 2 != 0:
             continue
         inst = normalize_text(row.get("instruction") or "")
         inp = normalize_text(row.get("input") or "")
@@ -636,11 +658,16 @@ def format_cpt_document(doc: dict, rng: random.Random) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare Nazrul + Basic Bangla training datasets")
-    parser.add_argument("--cache-dir", type=Path, default=Path("/content/probe_data"))
+    parser = argparse.ArgumentParser(description="Prepare large Nazrul + Poetics + Basic Bangla datasets (L4/T4 ready)")
+    parser.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--val-ratio", type=float, default=0.05)
-    parser.add_argument("--nazrul-upsample", type=int, default=2)
+    parser.add_argument("--nazrul-upsample", type=int, default=3)
+    parser.add_argument("--craft-upsample", type=int, default=4)
+    parser.add_argument("--max-wiki-docs", type=int, default=4500)
+    parser.add_argument("--max-sahitya-docs", type=int, default=1800)
+    parser.add_argument("--max-poem-docs", type=int, default=3500)
+    parser.add_argument("--max-general-sft", type=int, default=5000)
     parser.add_argument("--skip-cpt", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -675,7 +702,12 @@ def main() -> None:
 
     if not args.skip_cpt:
         tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
-        basic_docs = collect_basic_bangla_corpus(args.cache_dir) + craft_articles
+        basic_docs = collect_basic_bangla_corpus(
+            args.cache_dir,
+            max_wiki_docs=args.max_wiki_docs,
+            max_sahitya_docs=args.max_sahitya_docs,
+            max_poem_docs=args.max_poem_docs,
+        ) + craft_articles * 2
 
         for _ in range(args.nazrul_upsample):
             for d in naz_train_docs:
@@ -708,11 +740,11 @@ def main() -> None:
     naz_sft_train = build_nazrul_sft_examples(naz_train_docs, seed=args.seed)
     craft_sft = build_craft_sft_examples(craft_articles)
     naz_sft_val = build_nazrul_sft_examples(naz_val_docs, seed=args.seed + 1)
-    gen_sft = collect_general_bangla_sft(max_examples=1500, seed=args.seed)
+    gen_sft = collect_general_bangla_sft(max_examples=args.max_general_sft, seed=args.seed)
 
-    sft_train = naz_sft_train + craft_sft * 3 + gen_sft
+    sft_train = naz_sft_train + craft_sft * args.craft_upsample + gen_sft
     rng.shuffle(sft_train)
-    sft_val = naz_sft_val[:200]
+    sft_val = naz_sft_val[:400]
 
     write_jsonl(args.out_dir / "sft_train.jsonl", sft_train)
     write_jsonl(args.out_dir / "sft_val.jsonl", sft_val)
