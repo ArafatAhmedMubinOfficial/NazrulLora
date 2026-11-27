@@ -11,6 +11,8 @@ import os
 import random
 import re
 import shutil
+import sys
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -420,8 +423,17 @@ def fetch_wikipedia_craft_articles(cache_dir: Path) -> List[dict]:
             {"action": "parse", "page": page, "prop": "text", "redirects": 1, "format": "json"}
         )
         try:
+            time.sleep(0.4)
             req = urllib.request.Request(u, headers={"User-Agent": "NazrulResearchBot/1.0"})
-            d = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+            try:
+                raw_resp = urllib.request.urlopen(req, timeout=15).read().decode()
+            except Exception as exc:
+                if "429" in str(exc):
+                    time.sleep(2.5)
+                    raw_resp = urllib.request.urlopen(req, timeout=15).read().decode()
+                else:
+                    raise
+            d = json.loads(raw_resp)
             html_str = d.get("parse", {}).get("text", {}).get("*", "")
             paras = re.findall(r"<p>(.*?)</p>", html_str, flags=re.S)
             clean_paras = []
@@ -778,3 +790,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Avoid Python 3.12 PyGILState_Release SIGABRT from background pyarrow/streaming C threads on exit
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

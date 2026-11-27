@@ -11,6 +11,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -503,3 +504,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
