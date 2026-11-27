@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end 2-hour L4 iterative V1 -> V2 -> V3 -> V4 -> Final training launcher for Camber.
 set -euo pipefail
+export PYTHONUNBUFFERED=1
 
 echo "=== [1/4] Installing dependencies ==="
 python3 -m pip install -q --upgrade pip "brotli>=1.2.0" "brotlicffi>=1.2.0" "urllib3>=2.2.0"

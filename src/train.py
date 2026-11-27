@@ -55,14 +55,22 @@ class PackedCPTDataset(Dataset):
     def __init__(self, jsonl_path: Path, tok: AutoTokenizer, seq_len: int = 512, max_blocks: int | None = None):
         eos_cand = tok.convert_tokens_to_ids("<eos>")
         sep_id = eos_cand if isinstance(eos_cand, int) and eos_cand >= 0 else tok.eos_token_id
-        stream: List[int] = []
+        texts: List[str] = []
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
                 txt = json.loads(line)["text"]
-                ids = tok.encode(txt, add_special_tokens=False)
+                if txt:
+                    texts.append(txt)
+        stream: List[int] = []
+        batch_sz = 512
+        for i in range(0, len(texts), batch_sz):
+            enc = tok(texts[i : i + batch_sz], add_special_tokens=False)["input_ids"]
+            for ids in enc:
                 if ids:
                     stream.extend(ids)
                     stream.append(sep_id)
+            if max_blocks is not None and len(stream) // seq_len >= max_blocks:
+                break
         n_blocks = len(stream) // seq_len
         if max_blocks is not None:
             n_blocks = min(n_blocks, max_blocks)

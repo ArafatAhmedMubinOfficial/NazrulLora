@@ -221,7 +221,7 @@ def collect_nazrul_corpus(cache_dir: Path) -> List[dict]:
                 "https://github.com/rafayetrafi/BanglaMusicStylo-A-Stylometric-Dataset-of-Bangla-Music-Lyrics/raw/master/BanglaStylometry%20Dataset.rar",
                 rar_file,
             )
-        if not shutil.which("unrar"):
+        if not shutil.which("unrar") and getattr(os, "geteuid", lambda: 1)() == 0:
             subprocess.run(["apt-get", "-qq", "update"], check=False)
             subprocess.run(["apt-get", "-qq", "install", "-y", "unrar"], check=False)
         ms_extract = cache_dir / "music_stylo"
@@ -229,7 +229,7 @@ def collect_nazrul_corpus(cache_dir: Path) -> List[dict]:
         if shutil.which("unrar"):
             subprocess.run(["unrar", "x", "-o+", "-idq", str(rar_file), str(ms_extract)], check=False)
         else:
-            print("[data] Warning: 'unrar' not installed; skipping BanglaMusicStylo archive.", flush=True)
+            print("[data] 'unrar' unavailable in non-root container; skipping BanglaMusicStylo archive.", flush=True)
     if ms_dir.exists():
         for fn in sorted(ms_dir.iterdir()):
             if fn.stat().st_size == 0:
@@ -717,6 +717,7 @@ def main() -> None:
                     n_tok = len(tok.encode(txt, add_special_tokens=False))
                     naz_cpt_tokens += n_tok
                     cpt_train_records.append({"text": txt, "group": f"nazrul_{d['kind']}", "tokens": n_tok})
+        print(f"[data] Tokenized {len(cpt_train_records)} Nazrul CPT chunks ({naz_cpt_tokens:,} tokens)...", flush=True)
 
         for d in basic_docs:
             for ch in chunk_by_paragraphs(d["text"], max_chars=1350):
@@ -725,6 +726,8 @@ def main() -> None:
                 n_tok = len(tok.encode(txt, add_special_tokens=False))
                 basic_cpt_tokens += n_tok
                 cpt_train_records.append({"text": txt, "group": d["kind"], "tokens": n_tok})
+                if len(cpt_train_records) % 3000 == 0:
+                    print(f"[data] Tokenized {len(cpt_train_records)} total CPT chunks...", flush=True)
 
         rng.shuffle(cpt_train_records)
 
