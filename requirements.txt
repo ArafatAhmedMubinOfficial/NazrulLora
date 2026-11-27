@@ -7,4 +7,5 @@ bitsandbytes>=0.44.0
 safetensors>=0.4.5
 sentencepiece>=0.2.0
 huggingface-hub>=0.25.0
+brotli>=1.2.0
 tqdm>=4.66.0

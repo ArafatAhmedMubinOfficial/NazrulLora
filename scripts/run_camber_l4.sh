@@ -3,7 +3,7 @@
 set -euo pipefail
 
 echo "=== [1/4] Installing dependencies ==="
-python3 -m pip install -q --upgrade pip
+python3 -m pip install -q --upgrade pip "brotli>=1.2.0" "brotlicffi>=1.2.0" "urllib3>=2.2.0"
 python3 -m pip install -q -r requirements.txt
 
 echo "=== [2/4] Building big Nazrul + Poetics + Modern Bangla dataset ==="
