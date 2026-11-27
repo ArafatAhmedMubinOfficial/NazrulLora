@@ -47,16 +47,29 @@ def score_bangla_rhyme(text: str) -> float:
     if unique_ratio < 0.65:
         return 0.05
 
+    def _norm_end(word: str) -> str:
+        return word.replace("ণ", "ন").replace("শ", "স").replace("ষ", "স").replace("ী", "ি").replace("ূ", "ু")
+
     end_words = [ln.split()[-1] if ln.split() else "" for ln in bn_lines]
-    keys = [w[-2:] if len(w) >= 2 else w for w in end_words]
-    matched = 0
-    for i, (k, w) in enumerate(zip(keys, end_words)):
-        if not k:
+    norm_words = [_norm_end(w) for w in end_words]
+    prose_endings = ("ছে", "ছেন", "ছিল", "ছিলেন", "লাম", "লেন", "বেন")
+    score_sum = 0.0
+    for i, nw in enumerate(norm_words):
+        if len(nw) < 2:
             continue
-        neighbors = [j for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(keys) and j != i]
-        if any(keys[j] == k and end_words[j] != w for j in neighbors):
-            matched += 1
-    return matched / len(keys)
+        neighbors = [j for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(norm_words) and j != i]
+        best_line = 0.0
+        for j in neighbors:
+            nj = norm_words[j]
+            if len(nj) < 2 or end_words[j] == end_words[i]:
+                continue
+            if nw[-2:] == nj[-2:]:
+                best_line = 1.0
+                break
+            if nw[-1] == nj[-1] and not end_words[i].endswith(prose_endings):
+                best_line = max(best_line, 0.75)
+        score_sum += best_line
+    return round(score_sum / len(norm_words), 2)
 
 
 def load_nazrul_model(model_path: Path, base_model_id: str = BASE_MODEL_ID, load_in_4bit: bool = True):
