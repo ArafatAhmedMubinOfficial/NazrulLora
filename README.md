@@ -1,28 +1,28 @@
-# Nazrul-1B — Kazi Nazrul Islam Bangla AI
+# Nazrul-4B (`NazrulLora`) — Kazi Nazrul Islam Bangla AI
 
-A compact, fluent **1.32B Bangla generative model** (`hishab/titulm-llama-3.2-1b-v2.0` + high-rank LoRA `r=64`, saved in fp16 at ~86 MB so the full trained adapter fits directly in Git without LFS) trained on Google Colab T4 via **Colab CLI** in under 1 hour.
+A compact, fluent **4.3B Bangla generative AI** (`unsloth/gemma-3-4b-it` + 4-bit QLoRA `r=16`, `~57 MB` fp16 adapter stored directly in Git without LFS) trained on Google Colab T4 via **Colab CLI** in under 1 hour.
 
-## Training Architecture
+## Why Gemma-3-4B (`unsloth/gemma-3-4b-it`)?
+After benchmarking five 2025–2026 `2B–4B` models head-to-head on Colab T4 (`hishab/titulm-llama-3.2-3b-v2.0-Instruct-v1.0`, `BanglaLLM/Bangla-s1k-qwen-2.5-3B-Instruct`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3.5-4B`, and `unsloth/gemma-3-4b-it`), `unsloth/gemma-3-4b-it` led in Bengali tokenizer efficiency (`3.74` chars/token), modern custom-prompt adherence, and zero-shot Bengali end-rhyme (`অন্ত্যমিল`), while fitting in `~3.25 GB` VRAM in 4-bit.
 
-1. **Base Backbone (`hishab/titulm-llama-3.2-1b-v2.0`)**:
-   - 1.32B parameters with 42k extended Bangla BPE tokens (~2.32 Bangla chars/token), pretrained on 37B Bangla tokens so general Bangla grammar and reasoning stay coherent ("small, not dumb").
-2. **Stage 1 — Continual Pretraining (Basic Bangla + Clean Kazi Nazrul Corpus)**:
-   - **Main Corpus (2,584 unique clean Nazrul works, ~6.25M chars)**: Poems (*Agnibina*, *Samyabadi*, *Sarbahara*, *Dolonchapa*, etc.), *Nazrul Geeti* songs, novels (*Kuhelika*, *Bandhanhara*, *Mrityukshudha*), short stories, essays, plays, and letters from `ekpatagolpo`, `bangla-kobita`, `Bengali-Poem-Dataset`, `rishiraj/bengali-poems`, `BanglaMusicStylo`, `Shakil2448868`, and `NazrulRachanabali`.
-   - **Basic Bangla Grounding (2,650 docs)**: Clean Bangla Wikipedia (`sayurio/bangla-wikipedia`) and classic Bengali literature (`barunsaha/bangla_sahitya` & classic poems).
-3. **Stage 2 — Instruction & Nazrul Style Fine-Tuning (SFT)**:
-   - Assistant-only masked instruction tuning over 6,635 Nazrul creative writing prompt pairs (Bangla & English prompts for poems, Nazrul Geeti, essays, stories, continuations) + 2,200 general Bangla instruction pairs (`BanglaLLM/bangla-alpaca-orca`).
+## Two-Stage Training Pipeline (< 1 Hour on Colab T4)
+1. **Stage 1 — Continual Pretraining (Nazrul Corpus + Bengali Poetics + Modern Context)**:
+   - **Kazi Nazrul Islam Works (`2,534+` unique clean writings):** Poems, *Nazrul Geeti* songs, novels (*Kuhelika*, *Bandhanhara*, *Mrityukshudha*), short stories, essays, plays, and letters.
+   - **Bengali Poetics & Modern Bangla Grounding:** Bangla Wikipedia articles on Bengali meter (*ছন্দ*), poetic ornaments (*অলংকার*), *Bidrohi*, *Nazrul Geeti*, and modern encyclopedic Bangla (`sayurio/bangla-wikipedia`) + classic literature (`barunsaha/bangla_sahitya`).
+2. **Stage 2 — Craft, Rhyme-Blueprint & Custom-Prompt SFT**:
+   - Assistant-only loss masking over poetics craft Q&A, rhyme-planned Nazrul stanzas (`[ছন্দ ও মিল-পরিকল্পনা]` + rhymed verse), Nazrul Geeti, verse continuations, and modern Bangla instructions (`BanglaLLM/bangla-alpaca-orca`).
 
 ---
 
 ## Run Anywhere (Colab, Kaggle, Lightning AI, Cimber, Modal)
 
-### 1. Google Colab / Kaggle / Lightning AI / Cimber (Notebook or Terminal)
-Open [`notebooks/Nazrul_1B_Playground.ipynb`](notebooks/Nazrul_1B_Playground.ipynb) directly, or run in any notebook cell / cloud terminal:
+### 1. Google Colab / Kaggle / Lightning AI / Cimber
+Open [`notebooks/Nazrul_1B_Playground.ipynb`](notebooks/Nazrul_1B_Playground.ipynb) or run in any notebook / cloud terminal:
 
 ```bash
 git clone https://github.com/ArafatAhmedMubinOfficial/NazrulLora.git && cd NazrulLora
 pip install -q -r requirements.txt
-python src/chat.py --prompt "কাজী নজরুল ইসলামের ভঙ্গিতে জাগরণ ও তারুণ্য নিয়ে একটি কবিতা লেখো।"
+python src/chat.py --rhyme-candidates 2 --prompt "কাজী নজরুল ইসলামের ভঙ্গিতে ছন্দ ও অন্ত্যমিল বজায় রেখে জাগরণ নিয়ে একটি কবিতা লেখো।"
 ```
 
 Interactive chat mode:

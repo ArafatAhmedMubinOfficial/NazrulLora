@@ -2,26 +2,28 @@
 param(
     [string]$SessionName = "nazrul-train",
     [string]$Gpu = "T4",
-    [double]$Stage1Minutes = 27.0,
-    [double]$Stage2Minutes = 17.0,
-    [int]$Stage1MaxSteps = 320,
-    [int]$Stage2MaxSteps = 360
+    [double]$Stage1Minutes = 19.0,
+    [double]$Stage2Minutes = 25.0,
+    [int]$Stage1MaxSteps = 45,
+    [int]$Stage2MaxSteps = 115
 )
 
 $ErrorActionPreference = "Stop"
 
 Write-Host "Provisioning Colab session '$SessionName' ($Gpu)..."
 colab new -s $SessionName --gpu $Gpu
+colab install -s $SessionName bitsandbytes
 
 Write-Host "Uploading project scripts..."
 colab exec -s $SessionName --timeout 60 "import os; os.makedirs('/content/nazrul_ai/src', exist_ok=True)"
+colab upload -s $SessionName src/peft_compat.py /content/nazrul_ai/src/peft_compat.py
 colab upload -s $SessionName src/prepare_data.py /content/nazrul_ai/src/prepare_data.py
 colab upload -s $SessionName src/train.py /content/nazrul_ai/src/train.py
 colab upload -s $SessionName src/eval_model.py /content/nazrul_ai/src/eval_model.py
 colab upload -s $SessionName src/chat.py /content/nazrul_ai/src/chat.py
 
-Write-Host "Building Nazrul + Basic Bangla dataset on Colab..."
-echo "import subprocess, sys; subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '-y', 'torchao'], check=False); import runpy; sys.argv=['prepare_data.py', '--out-dir', '/content/nazrul_ai/data/processed']; runpy.run_path('/content/nazrul_ai/src/prepare_data.py', run_name='__main__')" | colab exec -s $SessionName --timeout 600
+Write-Host "Building Nazrul + Poetics Craft + Basic Bangla dataset on Colab..."
+echo "import os, sys, runpy; os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN']='1'; sys.argv=['prepare_data.py', '--out-dir', '/content/nazrul_ai/data/processed']; runpy.run_path('/content/nazrul_ai/src/prepare_data.py', run_name='__main__')" | colab exec -s $SessionName --timeout 600
 
 Write-Host "Running 2-stage training (Stage1=${Stage1Minutes}m / ${Stage1MaxSteps} steps, Stage2=${Stage2Minutes}m / ${Stage2MaxSteps} steps)..."
 echo "import subprocess, sys; subprocess.run([sys.executable, '/content/nazrul_ai/src/train.py', '--data-dir', '/content/nazrul_ai/data/processed', '--out-dir', '/content/nazrul_ai/outputs', '--stage1-minutes', '$Stage1Minutes', '--stage2-minutes', '$Stage2Minutes', '--stage1-max-steps', '$Stage1MaxSteps', '--stage2-max-steps', '$Stage2MaxSteps'], check=True)" | colab exec -s $SessionName --timeout 3600

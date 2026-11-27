@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Two-stage Colab T4 training for Nazrul-1B:
-Stage 1: Domain Continual Pretraining (Basic Bangla + Kazi Nazrul Islam writings)
-Stage 2: Instruction & Style Fine-Tuning (Assistant-only loss masking)
+"""Two-stage Colab T4 QLoRA training for Nazrul-4B (unsloth/gemma-3-4b-it):
+Stage 1: Domain Continual Pretraining (Nazrul corpus + Bengali poetics + modern Bangla)
+Stage 2: Craft, Rhyme-Blueprint & Custom-Prompt SFT (assistant-only loss masking)
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 try:
     from src.peft_compat import patch_peft_torchao
@@ -28,32 +28,30 @@ except ImportError:
     from peft_compat import patch_peft_torchao
 
 patch_peft_torchao()
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 
-BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"
+BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
+LANGUAGE_MODEL_LORA_REGEX = r"model\.language_model\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"
 
 SYSTEM_PROMPT = (
-    "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, ওজস্বী ভাষা ও সৃজনশীল শৈলীতে "
-    "দক্ষ একজন বাংলা এআই লেখক। ব্যবহারকারীর প্রম্পট অনুযায়ী কাজী নজরুলের ভঙ্গিতে কবিতা, "
-    "গান (নজরুলগীতি), গল্প, প্রবন্ধ, নাটক বা গদ্য রচনা করুন এবং সাধারণ বাংলা প্রশ্নেরও নির্ভুল উত্তর দিন।"
+    "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, অন্ত্যমিল, ওজস্বী ভাষা ও সৃজনশীল "
+    "শৈলীতে দক্ষ একজন বাংলা এআই লেখক। ব্যবহারকারীর যেকোনো প্রম্পট (আধুনিক বা ধ্রুপদী) বুঝে কাজী নজরুলের "
+    "ভঙ্গিতে ছন্দোবদ্ধ ও অন্ত্যমিলযুক্ত কবিতা, নজরুলগীতি, গল্প বা প্রবন্ধ রচনা করুন এবং সাধারণ বাংলা প্রশ্নেরও নির্ভুল উত্তর দিন।"
 )
 
-NAZRUL_CHAT_TEMPLATE = (
-    "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% endif %}"
-    "{{ '<|begin_of_text|>' }}"
-    "{% if system_message is defined %}{{ '<|start_header_id|>system<|end_header_id|>\n\n' + system_message + '<|eot_id|>' }}{% endif %}"
-    "{% for message in loop_messages %}"
-    "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}"
-    "{% endfor %}"
-    "{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
-)
+
+def format_gemma_prompt(tok: AutoTokenizer, user_prompt: str) -> str:
+    """Format user turn with system guidance using Gemma-3's native turn template."""
+    msgs = [{"role": "user", "content": f"{SYSTEM_PROMPT}\n\n{user_prompt}"}]
+    return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
 
 
 class PackedCPTDataset(Dataset):
-    """Packs tokenized documents into fixed seq_len blocks with <|end_of_text|> boundaries."""
+    """Packs tokenized documents into fixed seq_len blocks with document EOS boundaries."""
 
     def __init__(self, jsonl_path: Path, tok: AutoTokenizer, seq_len: int = 512, max_blocks: int | None = None):
-        sep_id = tok.convert_tokens_to_ids("<|end_of_text|>")
+        eos_cand = tok.convert_tokens_to_ids("<eos>")
+        sep_id = eos_cand if isinstance(eos_cand, int) and eos_cand >= 0 else tok.eos_token_id
         stream: List[int] = []
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -83,21 +81,18 @@ class PackedCPTDataset(Dataset):
 
 
 class SFTDataset(Dataset):
-    """Formats prompt/response pairs into Llama-3 chat format with assistant-only loss masking."""
+    """Formats prompt/response pairs into Gemma-3 turn format with assistant-only loss masking."""
 
     def __init__(self, jsonl_path: Path, tok: AutoTokenizer, max_len: int = 576):
         self.samples: List[Tuple[List[int], List[int]]] = []
         self.pad_id = tok.pad_token_id
+        eot_tok = "<end_of_turn>" if "<end_of_turn>" in tok.get_vocab() else (tok.eos_token or "")
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
                 row = json.loads(line)
-                prompt_msgs = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": row["prompt"]},
-                ]
-                prompt_text = tok.apply_chat_template(prompt_msgs, tokenize=False, add_generation_prompt=True)
+                prompt_text = format_gemma_prompt(tok, row["prompt"])
                 prompt_ids = tok.encode(prompt_text, add_special_tokens=False)
-                resp_ids = tok.encode(row["response"] + "<|eot_id|>", add_special_tokens=False)
+                resp_ids = tok.encode(row["response"] + eot_tok + "\n", add_special_tokens=False)
 
                 full_ids = prompt_ids + resp_ids
                 labels = [-100] * len(prompt_ids) + resp_ids
@@ -136,7 +131,7 @@ def make_sft_collate(pad_id: int):
 
 
 @torch.no_grad()
-def evaluate_loss(model: torch.nn.Module, loader: DataLoader, max_batches: int = 40) -> float:
+def evaluate_loss(model: torch.nn.Module, loader: DataLoader, max_batches: int = 30) -> float:
     model.eval()
     total_loss = 0.0
     count = 0
@@ -150,6 +145,7 @@ def evaluate_loss(model: torch.nn.Module, loader: DataLoader, max_batches: int =
             total_loss += float(out.loss.item())
             count += 1
     model.train()
+    torch.cuda.empty_cache()
     return total_loss / max(1, count)
 
 
@@ -171,20 +167,22 @@ def run_stage(
     max_epochs: float,
     max_steps: int,
     max_minutes: float,
-    log_every: int = 5,
+    log_every: int = 2,
 ) -> dict:
     model.train()
     trainable = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=0.01, betas=(0.9, 0.95))
-    scaler = torch.amp.GradScaler("cuda")
 
     steps_per_epoch = max(1, len(train_loader) // grad_accum)
     epoch_steps = max(1, int(steps_per_epoch * max_epochs))
     total_opt_steps = min(epoch_steps, max_steps) if max_steps > 0 else epoch_steps
-    warmup_steps = max(10, int(0.06 * total_opt_steps))
+    warmup_steps = max(4, int(0.08 * total_opt_steps))
 
     val_before = evaluate_loss(model, val_loader)
-    print(f"\n=== [{name}] start | micro_batches={len(train_loader)} | target_opt_steps={total_opt_steps} | max_min={max_minutes:.1f} | val_loss_before={val_before:.4f} (ppl={math.exp(min(20, val_before)):.2f}) ===", flush=True)
+    print(
+        f"\n=== [{name}] start | micro_batches={len(train_loader)} | target_opt_steps={total_opt_steps} | max_min={max_minutes:.1f} | val_loss_before={val_before:.4f} (ppl={math.exp(min(20, val_before)):.2f}) ===",
+        flush=True,
+    )
 
     t0 = time.time()
     opt_step = 0
@@ -201,19 +199,16 @@ def run_stage(
         for micro_idx, batch in enumerate(train_loader):
             batch = {k: v.to("cuda", non_blocking=True) for k, v in batch.items()}
             tokens_seen += int(batch["attention_mask"].sum().item())
-            with torch.amp.autocast("cuda", dtype=torch.float16):
-                loss = model(**batch).loss / grad_accum
-            scaler.scale(loss).backward()
+            loss = model(**batch).loss / grad_accum
+            loss.backward()
             step_loss += float(loss.item())
 
             if (micro_idx + 1) % grad_accum == 0 or (micro_idx + 1) == len(train_loader):
-                scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                 cur_lr = cosine_lr(opt_step, total_opt_steps, warmup_steps, lr)
                 for pg in opt.param_groups:
                     pg["lr"] = cur_lr
-                scaler.step(opt)
-                scaler.update()
+                opt.step()
                 opt.zero_grad()
                 opt_step += 1
                 log_loss_sum += step_loss
@@ -257,25 +252,24 @@ def run_stage(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Nazrul-1B on Colab T4 in under 1 hour")
+    parser = argparse.ArgumentParser(description="Train Nazrul-4B (Gemma-3 QLoRA) on Colab T4 in under 1 hour")
     parser.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
-    parser.add_argument("--stage1-minutes", type=float, default=27.0)
-    parser.add_argument("--stage2-minutes", type=float, default=17.0)
-    parser.add_argument("--stage1-max-steps", type=int, default=320)
-    parser.add_argument("--stage2-max-steps", type=int, default=360)
+    parser.add_argument("--stage1-minutes", type=float, default=19.0)
+    parser.add_argument("--stage2-minutes", type=float, default=25.0)
+    parser.add_argument("--stage1-max-steps", type=int, default=45)
+    parser.add_argument("--stage2-max-steps", type=int, default=115)
     parser.add_argument("--stage1-epochs", type=float, default=1.0)
     parser.add_argument("--stage2-epochs", type=float, default=2.0)
     parser.add_argument("--cpt-seq-len", type=int, default=512)
     parser.add_argument("--sft-max-len", type=int, default=576)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum", type=int, default=8)
-    parser.add_argument("--lora-r", type=int, default=64)
-    parser.add_argument("--lora-alpha", type=int, default=128)
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--resume-lora", type=Path, default=None)
     parser.add_argument("--skip-stage1", action="store_true")
-    parser.add_argument("--sft-lr", type=float, default=8e-5)
-    parser.add_argument("--save-merged", action="store_true")
+    parser.add_argument("--sft-lr", type=float, default=6e-5)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -283,17 +277,27 @@ def main() -> None:
     torch.manual_seed(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[train] Loading tokenizer & base model: {BASE_MODEL_ID}", flush=True)
+    print(f"[train] Loading tokenizer & 4-bit NF4 base model: {BASE_MODEL_ID}", flush=True)
     tok = AutoTokenizer.from_pretrained(args.resume_lora if args.resume_lora else BASE_MODEL_ID)
-    if "<|finetune_right_pad_id|>" in tok.get_vocab():
-        tok.pad_token = "<|finetune_right_pad_id|>"
-    elif tok.pad_token is None:
+    if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    tok.chat_template = NAZRUL_CHAT_TEMPLATE
 
-    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, dtype=torch.float16, device_map="auto")
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, quantization_config=bnb, device_map="auto")
+    model.config.use_cache = False
+    model = prepare_model_for_kbit_training(
+        model,
+        use_gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+    )
+
     if args.resume_lora:
-        print(f"[train] Resuming trainable LoRA adapter from {args.resume_lora}", flush=True)
+        print(f"[train] Resuming trainable QLoRA adapter from {args.resume_lora}", flush=True)
         model = PeftModel.from_pretrained(model, str(args.resume_lora), is_trainable=True)
     else:
         lora_cfg = LoraConfig(
@@ -302,21 +306,18 @@ def main() -> None:
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM",
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            target_modules=LANGUAGE_MODEL_LORA_REGEX,
         )
         model = get_peft_model(model, lora_cfg)
-    for p in model.parameters():
-        if p.requires_grad:
-            p.data = p.data.float()
     model.print_trainable_parameters()
 
     s1_metrics = None
     if not args.skip_stage1:
         print("[train] Loading Stage 1 CPT datasets...", flush=True)
         cpt_train_ds = PackedCPTDataset(args.data_dir / "cpt_train.jsonl", tok, seq_len=args.cpt_seq_len)
-        cpt_val_ds = PackedCPTDataset(args.data_dir / "cpt_val.jsonl", tok, seq_len=args.cpt_seq_len, max_blocks=80)
+        cpt_val_ds = PackedCPTDataset(args.data_dir / "cpt_val.jsonl", tok, seq_len=args.cpt_seq_len, max_blocks=40)
         cpt_train_loader = DataLoader(cpt_train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
-        cpt_val_loader = DataLoader(cpt_val_ds, batch_size=args.batch_size, shuffle=False)
+        cpt_val_loader = DataLoader(cpt_val_ds, batch_size=1, shuffle=False)
         print(f"[train] CPT train blocks={len(cpt_train_ds)} ({len(cpt_train_ds)*args.cpt_seq_len:,} tokens), val blocks={len(cpt_val_ds)}", flush=True)
 
         s1_metrics = run_stage(
@@ -324,12 +325,12 @@ def main() -> None:
             model=model,
             train_loader=cpt_train_loader,
             val_loader=cpt_val_loader,
-            lr=1.5e-4,
+            lr=1e-4,
             grad_accum=args.grad_accum,
             max_epochs=args.stage1_epochs,
             max_steps=args.stage1_max_steps,
             max_minutes=args.stage1_minutes,
-            log_every=5,
+            log_every=2,
         )
 
         s1_dir = args.out_dir / "nazrul-lora-stage1"
@@ -341,7 +342,7 @@ def main() -> None:
     sft_val_ds = SFTDataset(args.data_dir / "sft_val.jsonl", tok, max_len=args.sft_max_len)
     collate_fn = make_sft_collate(tok.pad_token_id)
     sft_train_loader = DataLoader(sft_train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True, collate_fn=collate_fn)
-    sft_val_loader = DataLoader(sft_val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
+    sft_val_loader = DataLoader(sft_val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
     print(f"[train] SFT train examples={len(sft_train_ds)}, val examples={len(sft_val_ds)}", flush=True)
 
     s2_metrics = run_stage(
@@ -358,20 +359,12 @@ def main() -> None:
     )
 
     final_lora_dir = args.out_dir / "nazrul-lora"
-    # Cast adapter weights to fp16 before saving so adapter_model.safetensors (~86 MB) stays under GitHub's 100 MB limit
     for p in model.parameters():
         if p.requires_grad:
             p.data = p.data.half()
     model.save_pretrained(final_lora_dir)
     tok.save_pretrained(final_lora_dir)
     print(f"[train] Saved final fp16 LoRA adapter & tokenizer to {final_lora_dir}", flush=True)
-
-    if args.save_merged:
-        merged_dir = args.out_dir / "nazrul-1b-merged"
-        print(f"[train] Merging LoRA weights and saving to {merged_dir}...", flush=True)
-        merged = model.merge_and_unload()
-        merged.save_pretrained(merged_dir, safe_serialization=True)
-        tok.save_pretrained(merged_dir)
 
     summary = {
         "base_model": BASE_MODEL_ID,

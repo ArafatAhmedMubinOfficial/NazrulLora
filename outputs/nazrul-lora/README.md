@@ -1,9 +1,9 @@
 ---
-base_model: hishab/titulm-llama-3.2-1b-v2.0
+base_model: unsloth/gemma-3-4b-it
 library_name: peft
 pipeline_tag: text-generation
 tags:
-- base_model:adapter:hishab/titulm-llama-3.2-1b-v2.0
+- base_model:adapter:unsloth/gemma-3-4b-it
 - lora
 - transformers
 ---

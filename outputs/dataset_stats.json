@@ -1,46 +1,46 @@
 {
-  "unique_nazrul_docs": 2584,
-  "nazrul_train_docs": 2459,
-  "nazrul_val_docs": 125,
+  "unique_nazrul_docs": 2534,
+  "nazrul_train_docs": 2411,
+  "nazrul_val_docs": 123,
   "nazrul_genres": {
     "essay": {
       "docs": 59,
-      "chars": 284117
+      "chars": 283349
     },
     "letter": {
       "docs": 71,
-      "chars": 304125
+      "chars": 303154
     },
     "novel": {
-      "docs": 134,
-      "chars": 1292199
+      "docs": 85,
+      "chars": 776831
     },
     "play": {
       "docs": 24,
-      "chars": 355086
+      "chars": 354799
     },
     "poem": {
       "docs": 911,
-      "chars": 1458273
+      "chars": 1458022
     },
     "prose": {
-      "docs": 711,
-      "chars": 1887932
+      "docs": 710,
+      "chars": 1875306
     },
     "song": {
       "docs": 648,
-      "chars": 261158
+      "chars": 260650
     },
     "story": {
       "docs": 26,
-      "chars": 403545
+      "chars": 403248
     }
   },
-  "basic_bangla_docs": 2650,
-  "cpt_train_records": 19215,
-  "cpt_nazrul_tokens_total": 4514518,
-  "cpt_basic_bangla_tokens_total": 1227689,
-  "sft_train_nazrul_pairs": 6635,
-  "sft_train_general_bangla_pairs": 2200,
+  "basic_bangla_docs": 2657,
+  "cpt_train_records": 15792,
+  "cpt_nazrul_tokens_total": 3932665,
+  "cpt_basic_bangla_tokens_total": 1206984,
+  "sft_train_nazrul_pairs": 6353,
+  "sft_train_general_bangla_pairs": 1500,
   "sft_val_pairs": 200
 }

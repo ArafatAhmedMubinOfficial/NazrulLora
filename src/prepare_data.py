@@ -23,7 +23,7 @@ os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"
+BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
 
 SYSTEM_PROMPT = (
     "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, ওজস্বী ভাষা ও সৃজনশীল শৈলীতে "
@@ -380,12 +380,69 @@ THEME_LEXICON = [
 ]
 
 
+def fetch_wikipedia_craft_articles(cache_dir: Path) -> List[dict]:
+    """Fetch Bengali Wikipedia articles on Bengali meter, poetic ornaments, and Nazrul's craft."""
+    craft_cache = cache_dir / "bangla_poetics_craft.jsonl"
+    if craft_cache.exists():
+        with craft_cache.open("r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    print("[data] Fetching Bengali poetics & Nazrul literary craft articles...", flush=True)
+    titles = [
+        ("কাজী_নজরুল_ইসলাম", "কাজী নজরুল ইসলামের সাহিত্যিক শৈলী ও জীবন"),
+        ("নজরুলগীতি", "নজরুলগীতির সুর, তাল ও রচনাশৈলী"),
+        ("বিদ্রোহী_(কবিতা)", "বিদ্রোহী কবিতার রচনাকৌশল ও ছন্দ"),
+        ("অলংকার_(সাহিত্য)", "বাংলা কাব্যে অলংকার, উপমা ও রূপকের ব্যবহার"),
+        ("ছন্দ", "কবিতার ছন্দ ও মাত্রাবিন্যাস"),
+        ("কবিতা", "কবিতার গঠন, মিল ও কাব্যকলা"),
+        ("বাংলা_কবিতা", "বাংলা কবিতার ধারা ও ঐতিহ্য"),
+    ]
+    articles: List[dict] = []
+    for page, desc in titles:
+        u = "https://bn.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
+            {"action": "parse", "page": page, "prop": "text", "redirects": 1, "format": "json"}
+        )
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "NazrulResearchBot/1.0"})
+            d = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+            html_str = d.get("parse", {}).get("text", {}).get("*", "")
+            paras = re.findall(r"<p>(.*?)</p>", html_str, flags=re.S)
+            clean_paras = []
+            for p in paras:
+                txt = re.sub(r"\[[^\]]{1,5}\]", "", html.unescape(re.sub(r"<[^>]+>", "", p))).strip()
+                if len(txt) >= 50:
+                    clean_paras.append(txt)
+            full_txt = normalize_text("\n\n".join(clean_paras))
+            if len(full_txt) >= 300:
+                articles.append({"title": page.replace("_", " "), "desc": desc, "text": full_txt, "kind": "craft"})
+        except Exception as e:
+            print(f"  wiki craft warn ({page}): {e}", flush=True)
+    with craft_cache.open("w", encoding="utf-8") as f:
+        for a in articles:
+            f.write(json.dumps(a, ensure_ascii=False) + "\n")
+    print(f"[data] Collected {len(articles)} poetics & Nazrul craft articles.", flush=True)
+    return articles
+
+
 def _bangla_end_key(line: str) -> str:
-    """Extract normalized trailing Bengali phonetic key (last 2-3 chars ignoring punctuation)."""
+    """Extract normalized trailing Bengali phonetic key (last 2 chars ignoring punctuation)."""
     cleaned = re.sub(r"[^ঀ-৿]", "", line)
     if len(cleaned) < 2:
         return ""
     return cleaned[-2:]
+
+
+def extract_rhyme_pairs_hint(lines: List[str]) -> str:
+    """Summarize actual end-rhyme ending syllables found in a rhymed stanza."""
+    keys = [_bangla_end_key(ln) for ln in lines if ln.strip()]
+    pairs = []
+    for i in range(len(keys) - 1):
+        if keys[i] and (keys[i] == keys[i + 1] or (i + 2 < len(keys) and keys[i] == keys[i + 2])):
+            if keys[i] not in pairs:
+                pairs.append(keys[i])
+    if not pairs:
+        return ""
+    return " / ".join(f"-{k}" for k in pairs[:4])
 
 
 def score_verse_rhyme(lines: List[str]) -> float:
@@ -410,8 +467,24 @@ def infer_themes(text: str, title: str) -> List[str]:
     return found or ["জীবন, প্রকৃতি ও মানবিক অনুভূতি"]
 
 
+def build_craft_sft_examples(craft_articles: List[dict]) -> List[dict]:
+    """Build SFT Q&A pairs teaching Bengali poetics, meter, ornaments, and Nazrul's style."""
+    examples: List[dict] = []
+    for art in craft_articles:
+        chunks = chunk_by_paragraphs(art["text"], max_chars=950)
+        for i, ch in enumerate(chunks[:6]):
+            if len(ch) < 120:
+                continue
+            if i == 0:
+                q = f"{art['desc']} সম্পর্কে বিস্তারিত আলোচনা করো।"
+            else:
+                q = f"'{art['title']}' বিষয়ের একটি গুরুত্বপূর্ণ অংশ সহজ ও প্রামাণিকভাবে ব্যাখ্যা করো।"
+            examples.append({"prompt": q, "response": ch, "domain": "poetics_craft"})
+    return examples
+
+
 def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
-    """Generate clean, diverse prompt -> Nazrul response training pairs (rhyme-focused for verse)."""
+    """Generate clean, diverse prompt -> Nazrul response training pairs (rhyme & craft focused)."""
     rng = random.Random(seed)
     examples: List[dict] = []
 
@@ -451,15 +524,22 @@ def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
             elif kind == "poem":
                 lines = [ln.strip() for ln in first_chunk.splitlines() if ln.strip()]
                 rhyme = score_verse_rhyme(lines)
+                rhyme_hint = extract_rhyme_pairs_hint(lines)
                 repeats = 2 if rhyme >= 0.4 else 1
                 for _ in range(repeats):
                     p = rng.choice(poem_prompts_bn + poem_prompts_en).format(title=title, theme=theme_str)
                     examples.append({"prompt": p, "response": first_chunk, "domain": "nazrul_poem"})
-                # Also extract tightly rhymed 6-12 line stanza slices for crisp poetry training
-                if len(lines) >= 10 and rhyme >= 0.35:
+                if len(lines) >= 8 and rhyme >= 0.35:
                     stanza = "\n".join(lines[:10])
                     p2 = f"কাজী নজরুলের ভঙ্গিতে অন্ত্যমিল ও ছন্দ ঠিক রেখে নিচের বিষয়ে একটি সংক্ষিপ্ত কবিতা লেখো: {theme_str}।"
                     examples.append({"prompt": p2, "response": stanza, "domain": "nazrul_poem_rhymed"})
+                    if rhyme_hint and rng.random() < 0.35:
+                        craft_resp = (
+                            f"[ছন্দ ও মিল-পরিকল্পনা: {theme_str} ভাবনা, অন্ত্যমিল ({rhyme_hint}), ওজস্বী ও গীতল ছন্দ]\n\n"
+                            f"{stanza}"
+                        )
+                        p3 = f"কাজী নজরুলের লেখার কৌশল ও অন্ত্যমিল ({rhyme_hint}) ব্যবহার করে '{theme_str}' বিষয়ে একটি ছন্দোবদ্ধ কবিতা লেখো।"
+                        examples.append({"prompt": p3, "response": craft_resp, "domain": "nazrul_craft_blueprint"})
             elif kind in ("essay", "story", "novel", "play", "letter", "prose"):
                 p = f"কাজী নজরুল ইসলামের {genre_label} শৈলীতে '{title}' বিষয়ে একটি গদ্য লেখা রচনা করো।"
                 if rng.random() < 0.4:
@@ -545,7 +625,7 @@ def collect_general_bangla_sft(max_examples: int = 2000, seed: int = 42) -> List
 
 def format_cpt_document(doc: dict, rng: random.Random) -> str:
     """Format a Stage 1 CPT document with optional genre/title conditioning."""
-    if doc["kind"] in ("wiki", "classic_bn", "classic_poem"):
+    if doc["kind"] in ("wiki", "classic_bn", "classic_poem", "craft"):
         if doc.get("title") and rng.random() < 0.5:
             return f"শিরোনাম: {doc['title']}\n\n{doc['text']}"
         return doc["text"]
@@ -591,13 +671,15 @@ def main() -> None:
     naz_cpt_tokens = 0
     basic_cpt_tokens = 0
 
+    craft_articles = fetch_wikipedia_craft_articles(args.cache_dir)
+
     if not args.skip_cpt:
         tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
-        basic_docs = collect_basic_bangla_corpus(args.cache_dir)
+        basic_docs = collect_basic_bangla_corpus(args.cache_dir) + craft_articles
 
         for _ in range(args.nazrul_upsample):
             for d in naz_train_docs:
-                for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
+                for ch in chunk_by_paragraphs(d["text"], max_chars=1350):
                     chunk_doc = {**d, "text": ch}
                     txt = format_cpt_document(chunk_doc, rng)
                     n_tok = len(tok.encode(txt, add_special_tokens=False))
@@ -605,7 +687,7 @@ def main() -> None:
                     cpt_train_records.append({"text": txt, "group": f"nazrul_{d['kind']}", "tokens": n_tok})
 
         for d in basic_docs:
-            for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
+            for ch in chunk_by_paragraphs(d["text"], max_chars=1350):
                 chunk_doc = {**d, "text": ch}
                 txt = format_cpt_document(chunk_doc, rng)
                 n_tok = len(tok.encode(txt, add_special_tokens=False))
@@ -615,19 +697,20 @@ def main() -> None:
         rng.shuffle(cpt_train_records)
 
         for d in naz_val_docs:
-            for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
+            for ch in chunk_by_paragraphs(d["text"], max_chars=1350):
                 txt = f"শিরোনাম: {d['title']}\nধরন: {GENRE_BN.get(d['kind'], 'রচনা')}\nরচনা: কাজী নজরুল ইসলাম\n\n{ch}" if d["title"] else ch
                 cpt_val_records.append({"text": txt, "group": f"nazrul_{d['kind']}"})
 
         write_jsonl(args.out_dir / "cpt_train.jsonl", cpt_train_records)
         write_jsonl(args.out_dir / "cpt_val.jsonl", cpt_val_records)
 
-    # Build Stage 2 SFT pairs (poetry & rhyme-weighted)
+    # Build Stage 2 SFT pairs (poetry, craft guides, rhyme blueprints + general Bangla)
     naz_sft_train = build_nazrul_sft_examples(naz_train_docs, seed=args.seed)
+    craft_sft = build_craft_sft_examples(craft_articles)
     naz_sft_val = build_nazrul_sft_examples(naz_val_docs, seed=args.seed + 1)
-    gen_sft = collect_general_bangla_sft(max_examples=1200, seed=args.seed)
+    gen_sft = collect_general_bangla_sft(max_examples=1500, seed=args.seed)
 
-    sft_train = naz_sft_train + gen_sft
+    sft_train = naz_sft_train + craft_sft * 3 + gen_sft
     rng.shuffle(sft_train)
     sft_val = naz_sft_val[:200]
 

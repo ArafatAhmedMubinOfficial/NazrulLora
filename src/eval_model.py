@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate Nazrul-1B against the base model on held-out Nazrul perplexity and diverse prompts."""
+"""Evaluate Nazrul-4B against base Gemma-3-4B on held-out Nazrul perplexity, rhyme rate, and custom prompts."""
 
 from __future__ import annotations
 
@@ -13,38 +13,36 @@ from typing import List
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 try:
     from src.peft_compat import patch_peft_torchao
+    from src.chat import generate, score_bangla_rhyme
 except ImportError:
     from peft_compat import patch_peft_torchao
+    from chat import generate, score_bangla_rhyme
 
 patch_peft_torchao()
 from peft import PeftModel
 
-BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"
-
-SYSTEM_PROMPT = (
-    "আপনি জাতীয় কবি কাজী নজরুল ইসলামের সাহিত্যিক ভাবধারা, ছন্দ, ওজস্বী ভাষা ও সৃজনশীল শৈলীতে "
-    "দক্ষ একজন বাংলা এআই লেখক। ব্যবহারকারীর প্রম্পট অনুযায়ী কাজী নজরুলের ভঙ্গিতে কবিতা, "
-    "গান (নজরুলগীতি), গল্প, প্রবন্ধ, নাটক বা গদ্য রচনা করুন এবং সাধারণ বাংলা প্রশ্নেরও নির্ভুল উত্তর দিন।"
-)
+BASE_MODEL_ID = "unsloth/gemma-3-4b-it"
 
 TEST_PROMPTS = [
-    ("revolutionary_poem", "কাজী নজরুল ইসলামের ভঙ্গিতে অন্যায় ও পরাধীনতার বিরুদ্ধে জাগরণ ও বিদ্রোহের উপর একটি কবিতা লেখো।"),
-    ("nazrul_geeti", "কাজী নজরুলের ভঙ্গিতে বর্ষা, মেঘ ও বিরহ নিয়ে একটি নজরুলগীতি রচনা করো।"),
-    ("prose_essay", "কাজী নজরুল ইসলামের ওজস্বী গদ্যশৈলীতে তরুণ সমাজ ও তারুণ্যের শক্তি নিয়ে একটি অনুচ্ছেদ লেখো।"),
-    ("short_story", "নজরুলের গল্প বলার ভঙ্গিতে গ্রামের সন্ধ্যা ও এক বাউণ্ডুলে তরুণের গল্প শুরু করো।"),
-    ("verse_continuation", "কাজী নজরুলের শৈলী অনুসরণ করে নিচের লেখাটি এগিয়ে নিয়ে যাও:\n\nগাহি সাম্যের গান—\nযেখানে আসিয়া এক হয়ে গেছে সব বাধা-ব্যবধান,"),
-    ("english_prompt", "Write a passionate Bangla poem in the style of Kazi Nazrul Islam about freedom and youth."),
-    ("general_bangla", "বাংলাদেশের জাতীয় কবি কে এবং তাঁর সাহিত্যকর্মের মূল সুর কী? সংক্ষেপে বলো।"),
+    ("revolutionary_poem", "কাজী নজরুল ইসলামের ভঙ্গিতে ছন্দ ও অন্ত্যমিল বজায় রেখে অন্যায় ও পরাধীনতার বিরুদ্ধে জাগরণের উপর ৮-১০ লাইনের একটি কবিতা লেখো।"),
+    ("custom_social_satire", "কাজী নজরুল ইসলামের ভঙ্গিতে ছন্দ ও অন্ত্যমিল বজায় রেখে আধুনিক সমাজে নারীর সম্মানের আদর্শ কীভাবে ভোগবাদ, নগ্নতা ও অশ্লীলতার নামে বিকৃত হয়ে গেছে—তা নিয়ে ৮-১০ লাইনের একটি প্রতিবাদী ও আক্ষেপভরা কবিতা লেখো।"),
+    ("nazrul_geeti", "কাজী নজরুলের ভঙ্গিতে বর্ষা, মেঘ ও বিরহ নিয়ে একটি ছন্দোবদ্ধ নজরুলগীতি রচনা করো।"),
+    ("craft_and_poem", "কাজী নজরুল ইসলামের লেখার কৌশল, ছন্দ ও শব্দচয়নের বৈশিষ্ট্য সংক্ষেপে ব্যাখ্যা করে তাঁর ভঙ্গিতে তারুণ্যের শক্তি নিয়ে একটি ছন্দোবদ্ধ কবিতা লেখো।"),
+    ("prose_essay", "কাজী নজরুল ইসলামের ওজস্বী গদ্যশৈলীতে তরুণ সমাজ ও তারুণ্যের দায়িত্ব নিয়ে একটি অনুচ্ছেদ লেখো।"),
+    ("verse_continuation", "কাজী নজরুলের ছন্দ ও অন্ত্যমিল অনুসরণ করে নিচের লেখাটি এগিয়ে নিয়ে যাও:\n\nগাহি সাম্যের গান—\nযেখানে আসিয়া এক হয়ে গেছে সব বাধা-ব্যবধান,"),
+    ("english_prompt", "Write a rhymed Bangla poem in the style of Kazi Nazrul Islam about freedom, youth, and standing against hypocrisy."),
+    ("general_bangla", "বাংলাদেশের জাতীয় কবি কে এবং তাঁর সাহিত্যকর্মের মূল সুর ও ছন্দ-বৈশিষ্ট্য কী? সংক্ষেপে বলো।"),
 ]
 
 
 @torch.no_grad()
-def compute_val_ppl(model: torch.nn.Module, tok: AutoTokenizer, val_jsonl: Path, seq_len: int = 512, max_blocks: int = 60) -> float:
-    sep_id = tok.convert_tokens_to_ids("<|end_of_text|>")
+def compute_val_ppl(model: torch.nn.Module, tok: AutoTokenizer, val_jsonl: Path, seq_len: int = 512, max_blocks: int = 35) -> float:
+    eos_cand = tok.convert_tokens_to_ids("<eos>")
+    sep_id = eos_cand if isinstance(eos_cand, int) and eos_cand >= 0 else tok.eos_token_id
     stream: List[int] = []
     with val_jsonl.open("r", encoding="utf-8") as f:
         for line in f:
@@ -54,62 +52,45 @@ def compute_val_ppl(model: torch.nn.Module, tok: AutoTokenizer, val_jsonl: Path,
     total_loss = 0.0
     for i in range(n_blocks):
         x = torch.tensor(stream[i * seq_len : (i + 1) * seq_len], dtype=torch.long, device=model.device).unsqueeze(0)
-        with torch.amp.autocast("cuda", dtype=torch.float16) if model.device.type == "cuda" else torch.no_grad():
+        with torch.amp.autocast("cuda", dtype=torch.float16):
             loss = model(input_ids=x, labels=x).loss
         total_loss += float(loss.item())
     return math.exp(min(20.0, total_loss / max(1, n_blocks)))
 
 
-@torch.no_grad()
-def generate_reply(model: torch.nn.Module, tok: AutoTokenizer, prompt: str, use_chat_template: bool = True, max_new_tokens: int = 180) -> str:
-    if use_chat_template:
-        msgs = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
-        text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-    else:
-        text = prompt
-    inputs = tok(text, return_tensors="pt").to(model.device)
-    eot_id = tok.convert_tokens_to_ids("<|eot_id|>")
-    eos_ids = [tok.eos_token_id] if tok.eos_token_id == eot_id else [tok.eos_token_id, eot_id]
-    out = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=0.75,
-        top_p=0.9,
-        top_k=50,
-        repetition_penalty=1.15,
-        eos_token_id=eos_ids,
-        pad_token_id=tok.pad_token_id,
-    )
-    gen_ids = out[0][inputs["input_ids"].shape[1] :]
-    return tok.decode(gen_ids, skip_special_tokens=True).strip()
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate trained Nazrul-1B model")
+    parser = argparse.ArgumentParser(description="Evaluate trained Nazrul-4B model")
     parser.add_argument("--adapter-dir", type=Path, default=Path("outputs/nazrul-lora"))
     parser.add_argument("--val-jsonl", type=Path, default=Path("data/processed/cpt_val.jsonl"))
     parser.add_argument("--out-file", type=Path, default=Path("outputs/eval_report.json"))
     args = parser.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.adapter_dir)
-    if "<|finetune_right_pad_id|>" in tok.get_vocab():
-        tok.pad_token = "<|finetune_right_pad_id|>"
-    base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, dtype=torch.float16, device_map="auto")
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
+    base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, quantization_config=bnb, device_map="auto")
     base_model.eval()
     base_ppl = compute_val_ppl(base_model, tok, args.val_jsonl)
-    print(f"[eval] Base TituLM-1B held-out Nazrul PPL: {base_ppl:.2f}", flush=True)
+    print(f"[eval] Base Gemma-3-4B held-out Nazrul PPL: {base_ppl:.2f}", flush=True)
 
     ft_model = PeftModel.from_pretrained(base_model, str(args.adapter_dir))
     ft_model.eval()
     ft_ppl = compute_val_ppl(ft_model, tok, args.val_jsonl)
-    print(f"[eval] Fine-tuned Nazrul-1B held-out Nazrul PPL: {ft_ppl:.2f}", flush=True)
+    print(f"[eval] Fine-tuned Nazrul-4B held-out Nazrul PPL: {ft_ppl:.2f}", flush=True)
 
     samples = []
     for name, prompt in TEST_PROMPTS:
-        reply = generate_reply(ft_model, tok, prompt, use_chat_template=True, max_new_tokens=200)
-        print(f"\n--- [{name}] ---\nPROMPT: {prompt}\nNAZRUL-1B:\n{reply}", flush=True)
-        samples.append({"name": name, "prompt": prompt, "response": reply})
+        cands = 2 if "poem" in name or "geeti" in name or "satire" in name else 1
+        reply = generate(ft_model, tok, prompt, max_new_tokens=240, temperature=0.72, rhyme_candidates=cands)
+        rhyme_sc = round(score_bangla_rhyme(reply), 2)
+        print(f"\n--- [{name}] (rhyme_rate={rhyme_sc}) ---\nPROMPT: {prompt}\nNAZRUL-4B:\n{reply}", flush=True)
+        samples.append({"name": name, "prompt": prompt, "rhyme_rate": rhyme_sc, "response": reply})
 
     report = {
         "base_model": BASE_MODEL_ID,
