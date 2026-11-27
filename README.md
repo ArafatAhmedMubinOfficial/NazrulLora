@@ -36,17 +36,20 @@ pip install modal && modal setup
 modal run scripts/modal_app.py --prompt "কাজী নজরুলের ভঙ্গিতে বর্ষা ও মেঘ নিয়ে একটি নজরুলগীতি লেখো।"
 ```
 
-### 3. Train 2-Hour Multi-Round L4 Run on Camber (or any L4 / A100 cloud GPU)
-The `unsensored` branch packs a large multi-round training dataset (`2,534` unique Nazrul works upsampled `3x`, `18` Bengali poetics/meter/Nazrul craft articles, `4,500` Bangla Wikipedia docs, `1,800` classic Bangla literature docs, `3,500` non-Nazrul Bengali poems, and `5,000` Bangla Alpaca-Orca instructions):
+### 3. Train 2-Hour Iterative Loop (`V1 → V2 → V3 → V4 → Final`) on Camber L4
+The `unsensored` branch packs a large training dataset (`2,534` unique Nazrul works upsampled `3x`, `18` Bengali poetics/meter/Nazrul craft articles, `4,500` Bangla Wikipedia docs, `1,800` classic Bangla literature docs, `3,500` non-Nazrul Bengali poems, and `5,000` Bangla Alpaca-Orca instructions) and iteratively trains & saves each version (`outputs/versions/v1` → `v2` → `v3` → `v4` → final `outputs/nazrul-lora`) inside a 2-hour L4 job:
 
 ```bash
 git clone -b unsensored https://github.com/ArafatAhmedMubinOfficial/NazrulLora.git && cd NazrulLora
 bash scripts/run_camber_l4.sh
 ```
-Or customize rounds/budgets directly:
+Or chain versions manually step-by-step on Camber (`V1 → Train → Save V2 → Train → Save V3 → Train → Save V4`):
 ```bash
 python3 src/prepare_data.py --cache-dir data/cache --out-dir data/processed
-python3 src/train.py --preset l4 --rounds 2 --data-dir data/processed --out-dir outputs
+python3 src/train.py --preset l4 --versions 1 --start-version 1
+python3 src/train.py --preset l4 --versions 1 --start-version 2 --resume-lora outputs/versions/v1
+python3 src/train.py --preset l4 --versions 1 --start-version 3 --resume-lora outputs/versions/v2
+python3 src/train.py --preset l4 --versions 1 --start-version 4 --resume-lora outputs/versions/v3
 python3 src/eval_model.py --adapter-dir outputs/nazrul-lora
 ```
 

@@ -270,10 +270,11 @@ def run_stage(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Multi-round QLoRA training for Nazrul-4B (Gemma-4-E4B on L4/T4)")
-    parser.add_argument("--preset", choices=["l4", "t4"], default="l4", help="l4=2h multi-round (24GB bf16); t4=<1h (15GB fp16)")
+    parser.add_argument("--preset", choices=["l4", "t4"], default="l4", help="l4=2h V1->V4 loop (24GB bf16); t4=<1h (15GB fp16)")
     parser.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
-    parser.add_argument("--rounds", type=int, default=None)
+    parser.add_argument("--rounds", "--versions", dest="rounds", type=int, default=None, help="Number of iterative training versions (V1..VN)")
+    parser.add_argument("--start-version", type=int, default=1, help="Starting version number (set 2 when resuming from V1 to save V2, etc.)")
     parser.add_argument("--stage1-minutes", type=float, default=None)
     parser.add_argument("--stage2-minutes", type=float, default=None)
     parser.add_argument("--stage1-max-steps", type=int, default=None)
@@ -285,6 +286,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--grad-accum", type=int, default=None)
     parser.add_argument("--save-every", type=int, default=50)
+    parser.add_argument("--no-preview", action="store_true", help="Skip short sample poem preview after each version")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--resume-lora", type=Path, default=None)
@@ -295,7 +297,8 @@ def main() -> None:
     args = parser.parse_args()
 
     presets = {
-        "l4": dict(rounds=2, s1_min=40.0, s2_min=45.0, s1_steps=260, s2_steps=420, cpt_len=768, sft_len=768, bs=2, accum=8),
+        # L4 2-hour 4-version loop (V1 ~36m, V2 ~28m, V3 ~26m, V4 ~24m => ~114m total)
+        "l4": dict(rounds=4, s1_min=22.0, s2_min=14.0, s1_steps=180, s2_steps=160, cpt_len=768, sft_len=768, bs=2, accum=8),
         "t4": dict(rounds=1, s1_min=18.0, s2_min=27.0, s1_steps=45, s2_steps=115, cpt_len=512, sft_len=576, bs=1, accum=16),
     }
     p = presets[args.preset]
@@ -337,6 +340,9 @@ def main() -> None:
     if args.resume_lora:
         print(f"[train] Resuming trainable QLoRA adapter from {args.resume_lora}", flush=True)
         model = PeftModel.from_pretrained(model, str(args.resume_lora), is_trainable=True)
+        for param in model.parameters():
+            if param.requires_grad:
+                param.data = param.data.to(compute_dtype)
     else:
         lora_cfg = LoraConfig(
             r=args.lora_r,
@@ -366,20 +372,33 @@ def main() -> None:
     sft_val_loader = DataLoader(sft_val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
     print(f"[train] SFT train examples={len(sft_train_ds)}, val examples={len(sft_val_ds)}", flush=True)
 
+    versions_dir = args.out_dir / "versions"
+    versions_dir.mkdir(parents=True, exist_ok=True)
     round_logs = []
     total_min = 0.0
-    for r_idx in range(1, rounds + 1):
-        decay = 0.55 ** (r_idx - 1)
-        # Round 2+ acts as a shorter refinement loop (25% CPT refresh + 50% SFT polish)
-        r_s1_min = s1_min if r_idx == 1 else round(s1_min * 0.25, 2)
-        r_s2_min = s2_min if r_idx == 1 else round(s2_min * 0.50, 2)
-        r_s1_steps = s1_steps if r_idx == 1 else max(25, s1_steps // 3)
-        r_s2_steps = s2_steps if r_idx == 1 else max(40, s2_steps // 2)
+    # L4 4-version progression: V1 (broad CPT+SFT) -> V2 -> V3 -> V4 (SFT-heavy polish with decayed LR)
+    l4_cpt_scales = [1.0, 0.45, 0.27, 0.18]
+    l4_sft_scales = [1.0, 1.29, 1.43, 1.43]
+    l4_lr_scales = [1.0, 0.72, 0.50, 0.35]
 
+    for step_idx in range(rounds):
+        ver_num = args.start_version + step_idx
+        ver_tag = f"v{ver_num}"
+        scale_i = min(ver_num - 1, len(l4_lr_scales) - 1)
+        decay = l4_lr_scales[scale_i] if ver_num <= 4 else 0.35 * (0.7 ** (ver_num - 4))
+        cpt_scale = l4_cpt_scales[scale_i] if args.preset == "l4" else (1.0 if step_idx == 0 else 0.35)
+        sft_scale = l4_sft_scales[scale_i] if args.preset == "l4" else 1.0
+
+        r_s1_min = round(s1_min * cpt_scale, 2)
+        r_s2_min = round(s2_min * sft_scale, 2)
+        r_s1_steps = max(20, int(s1_steps * cpt_scale))
+        r_s2_steps = max(40, int(s2_steps * sft_scale))
+
+        print(f"\n==================== Training Version {ver_tag.upper()} ====================", flush=True)
         s1_metrics = None
-        if not args.skip_stage1 and cpt_train_loader is not None:
+        if not args.skip_stage1 and cpt_train_loader is not None and r_s1_min > 0:
             s1_metrics = run_stage(
-                name=f"R{r_idx}_CPT",
+                name=f"{ver_tag.upper()}_CPT",
                 model=model,
                 tok=tok,
                 train_loader=cpt_train_loader,
@@ -397,7 +416,7 @@ def main() -> None:
             total_min += s1_metrics["elapsed_min"]
 
         s2_metrics = run_stage(
-            name=f"R{r_idx}_SFT",
+            name=f"{ver_tag.upper()}_SFT",
             model=model,
             tok=tok,
             train_loader=sft_train_loader,
@@ -414,10 +433,46 @@ def main() -> None:
         )
         total_min += s2_metrics["elapsed_min"]
 
-        r_dir = args.out_dir / f"nazrul-lora-round{r_idx}"
-        model.save_pretrained(r_dir)
-        tok.save_pretrained(r_dir)
-        round_logs.append({"round": r_idx, "stage1": s1_metrics, "stage2": s2_metrics})
+        v_dir = versions_dir / ver_tag
+        model.save_pretrained(v_dir)
+        tok.save_pretrained(v_dir)
+        print(f"[train] Saved checkpoint version {ver_tag.upper()} -> {v_dir}", flush=True)
+
+        preview_text = None
+        if not args.no_preview:
+            model.eval()
+            model.config.use_cache = True
+            with torch.no_grad():
+                p_txt = format_gemma_prompt(
+                    tok,
+                    "কাজী নজরুল ইসলামের ভঙ্গিতে কঠোর ছন্দ ও অন্ত্যমিল বজায় রেখে অন্যায় ও ভণ্ডামির বিরুদ্ধে ৬-৮ লাইনের একটি কবিতা লেখো।",
+                )
+                p_in = tok(p_txt, return_tensors="pt").to(model.device)
+                eot_id = tok.convert_tokens_to_ids("<end_of_turn>")
+                eos_ids = [i for i in {tok.eos_token_id, eot_id} if isinstance(i, int) and i >= 0]
+                with torch.amp.autocast("cuda", dtype=compute_dtype):
+                    p_out = model.generate(
+                        **p_in,
+                        max_new_tokens=160,
+                        do_sample=True,
+                        temperature=0.72,
+                        top_p=0.9,
+                        repetition_penalty=1.15,
+                        eos_token_id=eos_ids,
+                        pad_token_id=tok.pad_token_id,
+                    )
+                preview_text = tok.decode(p_out[0][p_in["input_ids"].shape[1] :], skip_special_tokens=True).strip()
+            model.config.use_cache = False
+            model.train()
+            print(f"[{ver_tag.upper()} preview]\n{preview_text}\n", flush=True)
+            (versions_dir / f"{ver_tag}_preview.txt").write_text(preview_text, encoding="utf-8")
+
+        round_logs.append(
+            {"version": ver_tag, "adapter_dir": str(v_dir), "stage1": s1_metrics, "stage2": s2_metrics, "preview": preview_text}
+        )
+        (versions_dir / "version_history.json").write_text(
+            json.dumps(round_logs, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     final_lora_dir = args.out_dir / "nazrul-lora"
     for param in model.parameters():
