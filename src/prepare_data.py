@@ -369,54 +369,106 @@ def chunk_by_paragraphs(text: str, max_chars: int = 1050) -> List[str]:
     return chunks
 
 
+THEME_LEXICON = [
+    (["বিদ্রোহ", "স্বাধীন", "শিকল", "কারা", "অন্যায়", "শোষ", "রক্ত", "অগ্নি", "জাগ", "যুদ্ধ", "রণ"], "অন্যায় ও পরাধীনতার বিরুদ্ধে বিদ্রোহ ও জাগরণ"),
+    (["নারী", "মা ", "জননী", "রমনী", "লজ্জা", "সম্মান", "অপমান", "ভোগ", "দেহ", "পণ্য", "কলঙ্ক"], "নারীর মর্যাদা, সমাজের ভণ্ডামি ও নৈতিক অবক্ষয়"),
+    (["সাম্য", "মানুষ", "কুলি", "মজুর", "গরিব", "দারিদ্র্য", "ক্ষুধা", "ধনী", "ভণ্ড", "পাপ"], "সাম্যবাদ, মানবতা ও সমাজের ভণ্ডামি"),
+    (["তরুণ", "যৌবন", "নবীন", "উষা", "প্রভাত", "আশা", "পথিক", "চলো"], "তারুণ্যের শক্তি ও নবজাগরণ"),
+    (["বর্ষা", "মেঘ", "বৃষ্টি", "বাদল", "ঝড়", "শ্রাবণ", "আষাঢ়", "বিজলি"], "বর্ষা, মেঘ, ঝড় ও প্রকৃতির রূপ"),
+    (["প্রেম", "প্রিয়া", "বিরহ", "ভালোবাসা", "বাঁশি", "নয়ন", "আঁখি", "চাঁদ", "ফুল"], "প্রেম, বিরহ ও হৃদয়ের আকুতি"),
+    (["আল্লাহ", "খোদা", "রসুল", "ঈদ", "শ্যামা", "কালী", "মসজিদ", "মন্দির", "স্রষ্টা"], "আধ্যাত্মিকতা, ভক্তি ও মানবধর্ম"),
+]
+
+
+def _bangla_end_key(line: str) -> str:
+    """Extract normalized trailing Bengali phonetic key (last 2-3 chars ignoring punctuation)."""
+    cleaned = re.sub(r"[^ঀ-৿]", "", line)
+    if len(cleaned) < 2:
+        return ""
+    return cleaned[-2:]
+
+
+def score_verse_rhyme(lines: List[str]) -> float:
+    """Estimate fraction of lines participating in AABB or ABAB end-rhymes."""
+    if len(lines) < 4:
+        return 0.0
+    keys = [_bangla_end_key(ln) for ln in lines]
+    matched = 0
+    for i, k in enumerate(keys):
+        if not k:
+            continue
+        neighbors = [keys[j] for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(keys) and j != i]
+        if k in neighbors:
+            matched += 1
+    return matched / len(keys)
+
+
+def infer_themes(text: str, title: str) -> List[str]:
+    """Extract descriptive Bengali themes present in a poem or song."""
+    combined = f"{title} {text}"
+    found = [desc for kws, desc in THEME_LEXICON if any(kw in combined for kw in kws)]
+    return found or ["জীবন, প্রকৃতি ও মানবিক অনুভূতি"]
+
+
 def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
-    """Generate clean, diverse prompt -> Nazrul response training pairs."""
+    """Generate clean, diverse prompt -> Nazrul response training pairs (rhyme-focused for verse)."""
     rng = random.Random(seed)
     examples: List[dict] = []
 
     poem_prompts_bn = [
-        "কাজী নজরুল ইসলামের রচনাশৈলীতে '{title}' শিরোনামে একটি কবিতা লেখো।",
-        "বিদ্রোহী কবি কাজী নজরুলের ভঙ্গিতে '{title}' নিয়ে একটি প্রাণবন্ত কবিতা রচনা করো।",
-        "কাজী নজরুলের কাব্যিক ছন্দ ও ভাষায় '{title}' বিষয়ে একটি কবিতা লিখে দাও।",
+        "কাজী নজরুল ইসলামের রচনাশৈলীতে ছন্দ ও অন্ত্যমিল বজায় রেখে '{title}' শিরোনামে একটি কবিতা লেখো।",
+        "বিদ্রোহী কবি কাজী নজরুলের ভঙ্গিতে মিলযুক্ত ছন্দে '{title}' নিয়ে একটি প্রাণবন্ত কবিতা রচনা করো।",
+        "কাজী নজরুলের কাব্যিক ছন্দ ও ভাষায় নিচের বিষয় নিয়ে একটি ছন্দোবদ্ধ কবিতা লিখে দাও—বিষয়: {theme}।",
+        "কাজী নজরুল ইসলামের ভঙ্গিতে একটি সমাজ-ভাবনা ও আবেগময় কবিতা লেখো যেখানে {theme} ফুটে উঠেছে। ছন্দ ও অন্ত্যমিল অবশ্যই রাখবে।",
     ]
     poem_prompts_en = [
-        "Write a Bangla poem in the style of Kazi Nazrul Islam titled '{title}'.",
-        "Compose a Bengali poem inspired by Kazi Nazrul Islam on the theme '{title}'.",
+        "Write a rhymed Bangla poem in the style of Kazi Nazrul Islam titled '{title}'.",
+        "Compose a rhythmic Bengali poem in Kazi Nazrul Islam's voice about {theme}.",
     ]
     song_prompts_bn = [
-        "কাজী নজরুল ইসলামের ভঙ্গিতে '{title}' শীর্ষক একটি নজরুলগীতি রচনা করো।",
-        "নজরুলগীতির সুরেলা ছন্দে '{title}' ভাবনা নিয়ে একটি গান লেখো।",
+        "কাজী নজরুল ইসলামের ভঙ্গিতে ছন্দ ও অন্ত্যমিলসহ '{title}' শীর্ষক একটি নজরুলগীতি রচনা করো।",
+        "নজরুলগীতির সুরেলা ছন্দে {theme} নিয়ে একটি গান লেখো।",
         "কবি কাজী নজরুলের গানের ধাঁচে '{title}' নিয়ে একটি গীতি-রচনা তৈরি করো।",
     ]
     prose_prompts_bn = [
         "কাজী নজরুল ইসলামের গদ্যশৈলীতে '{title}' বিষয়ে একটি সাহিত্যিক রচনা লেখো।",
-        "নজরুলের ওজস্বী ও আবেগঘন ভাষায় '{title}' নিয়ে একটি অনুচ্ছেদ রচনা করো।",
+        "নজরুলের ওজস্বী ও আবেগঘন ভাষায় '{title}' নিয়ে একটি গদ্য অনুচ্ছেদ রচনা করো।",
     ]
 
     for doc in docs:
         title = doc["title"] or "ভাবনা"
         kind = doc["kind"]
         genre_label = GENRE_BN.get(kind, "সাহিত্য রচনা")
-        chunks = chunk_by_paragraphs(doc["text"], max_chars=950)
+        chunks = chunk_by_paragraphs(doc["text"], max_chars=900)
+        themes = infer_themes(doc["text"], title)
+        theme_str = themes[0]
 
-        # 1. Title/theme creative generation prompt (first chunk or full short work)
         first_chunk = chunks[0]
         if len(first_chunk) >= 80:
             if kind == "song":
-                p = rng.choice(song_prompts_bn).format(title=title)
+                p = rng.choice(song_prompts_bn).format(title=title, theme=theme_str)
+                examples.append({"prompt": p, "response": first_chunk, "domain": "nazrul_song"})
             elif kind == "poem":
-                pool = poem_prompts_bn + poem_prompts_en
-                p = rng.choice(pool).format(title=title)
+                lines = [ln.strip() for ln in first_chunk.splitlines() if ln.strip()]
+                rhyme = score_verse_rhyme(lines)
+                repeats = 2 if rhyme >= 0.4 else 1
+                for _ in range(repeats):
+                    p = rng.choice(poem_prompts_bn + poem_prompts_en).format(title=title, theme=theme_str)
+                    examples.append({"prompt": p, "response": first_chunk, "domain": "nazrul_poem"})
+                # Also extract tightly rhymed 6-12 line stanza slices for crisp poetry training
+                if len(lines) >= 10 and rhyme >= 0.35:
+                    stanza = "\n".join(lines[:10])
+                    p2 = f"কাজী নজরুলের ভঙ্গিতে অন্ত্যমিল ও ছন্দ ঠিক রেখে নিচের বিষয়ে একটি সংক্ষিপ্ত কবিতা লেখো: {theme_str}।"
+                    examples.append({"prompt": p2, "response": stanza, "domain": "nazrul_poem_rhymed"})
             elif kind in ("essay", "story", "novel", "play", "letter", "prose"):
-                p = f"কাজী নজরুল ইসলামের {genre_label} শৈলীতে '{title}' বিষয়ে একটি লেখা রচনা করো।"
+                p = f"কাজী নজরুল ইসলামের {genre_label} শৈলীতে '{title}' বিষয়ে একটি গদ্য লেখা রচনা করো।"
                 if rng.random() < 0.4:
                     p = rng.choice(prose_prompts_bn).format(title=title)
-            else:
-                p = f"কাজী নজরুল ইসলামের ভঙ্গিতে '{title}' নিয়ে একটি লেখা দাও।"
-            examples.append({"prompt": p, "response": first_chunk, "domain": f"nazrul_{kind}"})
+                examples.append({"prompt": p, "response": first_chunk, "domain": f"nazrul_{kind}"})
 
-        # 2. Line/passage continuation prompt (diverse chunks)
-        for ch in chunks[:3]:
+        # 2. Line/passage continuation prompt (limit prose chunks so poems/songs dominate SFT)
+        max_ch = 3 if kind in ("poem", "song") else 1
+        for ch in chunks[:max_ch]:
             lines = [ln for ln in ch.splitlines() if ln.strip()]
             if len(lines) >= 4:
                 split_idx = min(3, max(2, len(lines) // 3))
@@ -424,12 +476,12 @@ def build_nazrul_sft_examples(docs: List[dict], seed: int = 42) -> List[dict]:
                 suffix = "\n".join(lines[split_idx:])
                 if len(prefix) >= 25 and len(suffix) >= 60:
                     cont_prompt = rng.choice([
-                        f"কাজী নজরুলের শৈলী অনুসরণ করে নিচের লেখাটি এগিয়ে নিয়ে যাও:\n\n{prefix}",
-                        f"নিচের পংক্তিগুলো কাজী নজরুল ইসলামের ভাবধারায় সম্পূর্ণ করো:\n\n{prefix}",
+                        f"কাজী নজরুলের ছন্দ ও অন্ত্যমিল অনুসরণ করে নিচের লেখাটি এগিয়ে নিয়ে যাও:\n\n{prefix}",
+                        f"নিচের পংক্তিগুলো কাজী নজরুল ইসলামের কাব্যধারায় মিল রেখে সম্পূর্ণ করো:\n\n{prefix}",
                         f"Continue this Bangla {genre_label} in Kazi Nazrul Islam's literary voice:\n\n{prefix}",
                     ])
                     examples.append({"prompt": cont_prompt, "response": suffix, "domain": f"nazrul_cont_{kind}"})
-            elif len(ch) >= 260:
+            elif len(ch) >= 260 and kind not in ("poem", "song"):
                 sents = re.split(r"(?<=[।?!॥])\s+", ch)
                 if len(sents) >= 4:
                     prefix = " ".join(sents[:2])
@@ -509,12 +561,12 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--val-ratio", type=float, default=0.05)
     parser.add_argument("--nazrul-upsample", type=int, default=2)
+    parser.add_argument("--skip-cpt", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
-    tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
 
     naz_docs = collect_nazrul_corpus(args.cache_dir)
     # Stratified train/val split by genre
@@ -528,53 +580,57 @@ def main() -> None:
         naz_val_docs.extend(lst[:n_val])
         naz_train_docs.extend(lst[n_val:])
 
-    basic_docs = collect_basic_bangla_corpus(args.cache_dir)
-
-    # Build Stage 1 CPT texts (chunked cleanly for long prose)
-    cpt_train_records: List[dict] = []
-    naz_cpt_tokens = 0
-    for _ in range(args.nazrul_upsample):
-        for d in naz_train_docs:
-            for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
-                chunk_doc = {**d, "text": ch}
-                txt = format_cpt_document(chunk_doc, rng)
-                n_tok = len(tok.encode(txt, add_special_tokens=False))
-                naz_cpt_tokens += n_tok
-                cpt_train_records.append({"text": txt, "group": f"nazrul_{d['kind']}", "tokens": n_tok})
-
-    basic_cpt_tokens = 0
-    for d in basic_docs:
-        for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
-            chunk_doc = {**d, "text": ch}
-            txt = format_cpt_document(chunk_doc, rng)
-            n_tok = len(tok.encode(txt, add_special_tokens=False))
-            basic_cpt_tokens += n_tok
-            cpt_train_records.append({"text": txt, "group": d["kind"], "tokens": n_tok})
-
-    rng.shuffle(cpt_train_records)
-
-    cpt_val_records: List[dict] = []
-    for d in naz_val_docs:
-        for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
-            txt = f"শিরোনাম: {d['title']}\nধরন: {GENRE_BN.get(d['kind'], 'রচনা')}\nরচনা: কাজী নজরুল ইসলাম\n\n{ch}" if d["title"] else ch
-            cpt_val_records.append({"text": txt, "group": f"nazrul_{d['kind']}"})
-
-    # Build Stage 2 SFT pairs
-    naz_sft_train = build_nazrul_sft_examples(naz_train_docs, seed=args.seed)
-    naz_sft_val = build_nazrul_sft_examples(naz_val_docs, seed=args.seed + 1)
-    gen_sft = collect_general_bangla_sft(max_examples=min(2200, max(1000, len(naz_sft_train) // 2)), seed=args.seed)
-
-    sft_train = naz_sft_train + gen_sft
-    rng.shuffle(sft_train)
-    sft_val = naz_sft_val[:200]
-
     def write_jsonl(path: Path, rows: List[dict]) -> None:
         with path.open("w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    write_jsonl(args.out_dir / "cpt_train.jsonl", cpt_train_records)
-    write_jsonl(args.out_dir / "cpt_val.jsonl", cpt_val_records)
+    cpt_train_records: List[dict] = []
+    cpt_val_records: List[dict] = []
+    basic_docs: List[dict] = []
+    naz_cpt_tokens = 0
+    basic_cpt_tokens = 0
+
+    if not args.skip_cpt:
+        tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
+        basic_docs = collect_basic_bangla_corpus(args.cache_dir)
+
+        for _ in range(args.nazrul_upsample):
+            for d in naz_train_docs:
+                for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
+                    chunk_doc = {**d, "text": ch}
+                    txt = format_cpt_document(chunk_doc, rng)
+                    n_tok = len(tok.encode(txt, add_special_tokens=False))
+                    naz_cpt_tokens += n_tok
+                    cpt_train_records.append({"text": txt, "group": f"nazrul_{d['kind']}", "tokens": n_tok})
+
+        for d in basic_docs:
+            for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
+                chunk_doc = {**d, "text": ch}
+                txt = format_cpt_document(chunk_doc, rng)
+                n_tok = len(tok.encode(txt, add_special_tokens=False))
+                basic_cpt_tokens += n_tok
+                cpt_train_records.append({"text": txt, "group": d["kind"], "tokens": n_tok})
+
+        rng.shuffle(cpt_train_records)
+
+        for d in naz_val_docs:
+            for ch in chunk_by_paragraphs(d["text"], max_chars=1100):
+                txt = f"শিরোনাম: {d['title']}\nধরন: {GENRE_BN.get(d['kind'], 'রচনা')}\nরচনা: কাজী নজরুল ইসলাম\n\n{ch}" if d["title"] else ch
+                cpt_val_records.append({"text": txt, "group": f"nazrul_{d['kind']}"})
+
+        write_jsonl(args.out_dir / "cpt_train.jsonl", cpt_train_records)
+        write_jsonl(args.out_dir / "cpt_val.jsonl", cpt_val_records)
+
+    # Build Stage 2 SFT pairs (poetry & rhyme-weighted)
+    naz_sft_train = build_nazrul_sft_examples(naz_train_docs, seed=args.seed)
+    naz_sft_val = build_nazrul_sft_examples(naz_val_docs, seed=args.seed + 1)
+    gen_sft = collect_general_bangla_sft(max_examples=1200, seed=args.seed)
+
+    sft_train = naz_sft_train + gen_sft
+    rng.shuffle(sft_train)
+    sft_val = naz_sft_val[:200]
+
     write_jsonl(args.out_dir / "sft_train.jsonl", sft_train)
     write_jsonl(args.out_dir / "sft_val.jsonl", sft_val)
 

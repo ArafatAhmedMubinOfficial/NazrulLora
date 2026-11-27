@@ -28,7 +28,7 @@ except ImportError:
     from peft_compat import patch_peft_torchao
 
 patch_peft_torchao()
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 
 BASE_MODEL_ID = "hishab/titulm-llama-3.2-1b-v2.0"
 
@@ -272,6 +272,9 @@ def main() -> None:
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--lora-r", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=128)
+    parser.add_argument("--resume-lora", type=Path, default=None)
+    parser.add_argument("--skip-stage1", action="store_true")
+    parser.add_argument("--sft-lr", type=float, default=8e-5)
     parser.add_argument("--save-merged", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -281,7 +284,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[train] Loading tokenizer & base model: {BASE_MODEL_ID}", flush=True)
-    tok = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
+    tok = AutoTokenizer.from_pretrained(args.resume_lora if args.resume_lora else BASE_MODEL_ID)
     if "<|finetune_right_pad_id|>" in tok.get_vocab():
         tok.pad_token = "<|finetune_right_pad_id|>"
     elif tok.pad_token is None:
@@ -289,43 +292,49 @@ def main() -> None:
     tok.chat_template = NAZRUL_CHAT_TEMPLATE
 
     model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, dtype=torch.float16, device_map="auto")
-    lora_cfg = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    )
-    model = get_peft_model(model, lora_cfg)
+    if args.resume_lora:
+        print(f"[train] Resuming trainable LoRA adapter from {args.resume_lora}", flush=True)
+        model = PeftModel.from_pretrained(model, str(args.resume_lora), is_trainable=True)
+    else:
+        lora_cfg = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        )
+        model = get_peft_model(model, lora_cfg)
     for p in model.parameters():
         if p.requires_grad:
             p.data = p.data.float()
     model.print_trainable_parameters()
 
-    print("[train] Loading Stage 1 CPT datasets...", flush=True)
-    cpt_train_ds = PackedCPTDataset(args.data_dir / "cpt_train.jsonl", tok, seq_len=args.cpt_seq_len)
-    cpt_val_ds = PackedCPTDataset(args.data_dir / "cpt_val.jsonl", tok, seq_len=args.cpt_seq_len, max_blocks=80)
-    cpt_train_loader = DataLoader(cpt_train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    cpt_val_loader = DataLoader(cpt_val_ds, batch_size=args.batch_size, shuffle=False)
-    print(f"[train] CPT train blocks={len(cpt_train_ds)} ({len(cpt_train_ds)*args.cpt_seq_len:,} tokens), val blocks={len(cpt_val_ds)}", flush=True)
+    s1_metrics = None
+    if not args.skip_stage1:
+        print("[train] Loading Stage 1 CPT datasets...", flush=True)
+        cpt_train_ds = PackedCPTDataset(args.data_dir / "cpt_train.jsonl", tok, seq_len=args.cpt_seq_len)
+        cpt_val_ds = PackedCPTDataset(args.data_dir / "cpt_val.jsonl", tok, seq_len=args.cpt_seq_len, max_blocks=80)
+        cpt_train_loader = DataLoader(cpt_train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
+        cpt_val_loader = DataLoader(cpt_val_ds, batch_size=args.batch_size, shuffle=False)
+        print(f"[train] CPT train blocks={len(cpt_train_ds)} ({len(cpt_train_ds)*args.cpt_seq_len:,} tokens), val blocks={len(cpt_val_ds)}", flush=True)
 
-    s1_metrics = run_stage(
-        name="Stage1_CPT",
-        model=model,
-        train_loader=cpt_train_loader,
-        val_loader=cpt_val_loader,
-        lr=1.5e-4,
-        grad_accum=args.grad_accum,
-        max_epochs=args.stage1_epochs,
-        max_steps=args.stage1_max_steps,
-        max_minutes=args.stage1_minutes,
-        log_every=5,
-    )
+        s1_metrics = run_stage(
+            name="Stage1_CPT",
+            model=model,
+            train_loader=cpt_train_loader,
+            val_loader=cpt_val_loader,
+            lr=1.5e-4,
+            grad_accum=args.grad_accum,
+            max_epochs=args.stage1_epochs,
+            max_steps=args.stage1_max_steps,
+            max_minutes=args.stage1_minutes,
+            log_every=5,
+        )
 
-    s1_dir = args.out_dir / "nazrul-lora-stage1"
-    model.save_pretrained(s1_dir)
-    tok.save_pretrained(s1_dir)
+        s1_dir = args.out_dir / "nazrul-lora-stage1"
+        model.save_pretrained(s1_dir)
+        tok.save_pretrained(s1_dir)
 
     print("[train] Loading Stage 2 SFT datasets...", flush=True)
     sft_train_ds = SFTDataset(args.data_dir / "sft_train.jsonl", tok, max_len=args.sft_max_len)
@@ -340,7 +349,7 @@ def main() -> None:
         model=model,
         train_loader=sft_train_loader,
         val_loader=sft_val_loader,
-        lr=8e-5,
+        lr=args.sft_lr,
         grad_accum=args.grad_accum,
         max_epochs=args.stage2_epochs,
         max_steps=args.stage2_max_steps,
@@ -366,7 +375,7 @@ def main() -> None:
 
     summary = {
         "base_model": BASE_MODEL_ID,
-        "total_training_min": round(s1_metrics["elapsed_min"] + s2_metrics["elapsed_min"], 2),
+        "total_training_min": round((s1_metrics["elapsed_min"] if s1_metrics else 0.0) + s2_metrics["elapsed_min"], 2),
         "stage1": s1_metrics,
         "stage2": s2_metrics,
     }
